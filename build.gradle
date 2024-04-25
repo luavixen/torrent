@@ -10,6 +10,8 @@ repositories {
 }
 
 dependencies {
+    implementation 'org.slf4j:slf4j-api:1.7.30'
+    implementation 'org.slf4j:slf4j-simple:1.7.30'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78'
     compileOnly 'org.jetbrains:annotations:24.1.0'
     testImplementation 'org.jetbrains.kotlin:kotlin-test'

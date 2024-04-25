@@ -2,6 +2,7 @@ package dev.foxgirl.torrent.client;
 
 import org.jetbrains.annotations.NotNull;
 
+import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -42,7 +43,7 @@ public final class Identity {
         this.address = address;
     }
 
-    private String formatID(byte[] id) {
+    private static String formatID(byte[] id) {
         id = id.clone();
         for (int i = 0; i < id.length; i++) {
             int b = id[i] & 0xFF;
@@ -72,7 +73,13 @@ public final class Identity {
 
     @Override
     public String toString() {
-        return "Identity{id='" + idString + "', address=" + address + "}";
+        String addressString;
+        if (address.getAddress() instanceof Inet6Address) {
+            addressString = "[" + address.getAddress().getHostAddress() + "]:" + address.getPort();
+        } else {
+            addressString = address.getAddress().getHostAddress() + ":" + address.getPort();
+        }
+        return idString + "@" + addressString;
     }
 
     @Override

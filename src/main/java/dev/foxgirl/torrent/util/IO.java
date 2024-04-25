@@ -5,6 +5,7 @@ import org.jetbrains.annotations.NotNull;
 import java.io.*;
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.InterruptedByTimeoutException;
 import java.nio.file.FileAlreadyExistsException;
@@ -39,6 +40,23 @@ public final class IO {
         byte[] buffer = new byte[length];
         readAll(stream, buffer, 0, length);
         return buffer;
+    }
+
+    public static byte @NotNull [] toArray(@NotNull ByteBuffer buffer, int length) {
+        Objects.requireNonNull(buffer, "Argument 'buffer'");
+        if (length < 0) {
+            throw new IllegalArgumentException("Length is negative");
+        }
+        if (length > buffer.remaining()) {
+            throw new IllegalArgumentException("Length is greater than remaining bytes, length " + length + ", remaining " + buffer.remaining());
+        }
+        byte[] array = new byte[length]; buffer.get(array);
+        return array;
+    }
+
+    public static byte @NotNull [] toArray(@NotNull ByteBuffer buffer) {
+        Objects.requireNonNull(buffer, "Argument 'buffer'");
+        return toArray(buffer, buffer.remaining());
     }
 
     public static @NotNull RuntimeException wrapException(@NotNull Exception cause) {

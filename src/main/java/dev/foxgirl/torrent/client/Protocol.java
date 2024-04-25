@@ -1,8 +1,13 @@
 package dev.foxgirl.torrent.client;
 
-import dev.foxgirl.torrent.util.*;
+import dev.foxgirl.torrent.util.DefaultExecutors;
+import dev.foxgirl.torrent.util.Hash;
+import dev.foxgirl.torrent.util.IO;
+import dev.foxgirl.torrent.util.Timeout;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -12,39 +17,40 @@ import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.Channels;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Objects;
-import java.util.Queue;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Protocol implements AutoCloseable {
 
-    private final @NotNull AsynchronousByteChannel channel;
-
-    public Protocol(@NotNull AsynchronousByteChannel channel) {
-        Objects.requireNonNull(channel, "Argument 'channel'");
-        this.channel = channel;
+    public interface Listener {
+        void onReceive(@NotNull MessageImpl message);
+        void onConnect(@NotNull Identity identity);
+        void onClose(@NotNull Throwable cause);
     }
 
-    private final AtomicBoolean isClosed = new AtomicBoolean();
+    private final @NotNull AsynchronousByteChannel channel;
+    private final @NotNull Protocol.Listener listener;
 
-    private final Event<@NotNull Identity> connectEvent = new Event<>();
-    private final Event<@NotNull Throwable> closeEvent = new Event<>();
-    private final Event<@NotNull MessageImpl> receiveEvent = new Event<>(null);
+    public Protocol(@NotNull AsynchronousByteChannel channel, @NotNull Protocol.Listener listener) {
+        Objects.requireNonNull(channel, "Argument 'channel'");
+        Objects.requireNonNull(listener, "Argument 'listener'");
+        this.channel = channel;
+        this.listener = listener;
+    }
 
-    private final Object lock = new Object();
+    private static final Logger LOGGER = LoggerFactory.getLogger(Protocol.class);
 
-    private Hash infoHash;
-    private Identity identity;
-    private Extensions extensions;
+    private static final byte[] PROTOCOL_STRING = "BitTorrent protocol".getBytes(StandardCharsets.ISO_8859_1);
 
-    private ReadHandler readHandler;
-    private WriteHandler writeHandler;
+    private static final Extensions SUPPORTED_EXTENSIONS = new Extensions();
+    static {
+        SUPPORTED_EXTENSIONS.setFastPeers(true);
+    }
 
     private static final long READ_TIMEOUT_MS = 120 * 1000;
     private static final long WRITE_TIMEOUT_MS = 30 * 1000;
@@ -54,12 +60,19 @@ public final class Protocol implements AutoCloseable {
     private static final int READ_BUFFER_SIZE = 36 * 1024;
     private static final int WRITE_BUFFER_SIZE = 36 * 1024;
 
-    private static final byte[] PROTOCOL_STRING = "BitTorrent protocol".getBytes(StandardCharsets.ISO_8859_1);
+    // 0 = disconnected, 1 = connecting, 2 = connected
+    private final AtomicInteger connectionState = new AtomicInteger();
 
-    private static final Extensions SUPPORTED_EXTENSIONS = new Extensions();
-    static {
-        SUPPORTED_EXTENSIONS.setFastPeers(true);
-    }
+    private final AtomicBoolean isClosed = new AtomicBoolean();
+
+    private final Object lock = new Object();
+
+    private Hash infoHash;
+    private Identity identity;
+    private Extensions extensions;
+
+    private ReadHandler readHandler;
+    private WriteHandler writeHandler;
 
     private final class ReadHandler implements CompletionHandler<Integer, Void> {
         private final ByteBuffer buffer = ByteBuffer.allocateDirect(READ_BUFFER_SIZE);
@@ -97,11 +110,12 @@ public final class Protocol implements AutoCloseable {
 
                 int messageLength = buffer.getInt(0);
                 if (messageLength < 0) {
-                    throw new IllegalStateException("Message length is negative: " + messageLength);
+                    throw new IllegalStateException("(Reading) Message length is negative: " + messageLength);
                 }
 
                 // Handle keep-alive message
                 if (messageLength == 0) {
+                    LOGGER.debug("Peer {} received keep-alive", getIdentity());
                     buffer.clear();
                     readFromChannel();
                     return;
@@ -115,16 +129,16 @@ public final class Protocol implements AutoCloseable {
                 int messageID = buffer.get(4) & 0xFF;
                 var messageType = MessageType.valueOf(messageID);
                 if (messageType == null) {
-                    throw new IllegalStateException("Message type not supported: " + String.format("0x%02X", messageID));
+                    throw new IllegalStateException("(Reading) Message type not supported: " + String.format("0x%02X", messageID));
                 }
 
                 int messagePayloadLength = messageLength - 1;
                 int messageTotalLength = messagePayloadLength + 5;
                 if (messageTotalLength < 0) {
-                    throw new IllegalStateException("Message payload length is negative or too large: " + messagePayloadLength);
+                    throw new IllegalStateException("(Reading) Message payload length is negative or too large: " + messagePayloadLength);
                 }
                 if (messageTotalLength > buffer.capacity()) {
-                    throw new IllegalStateException("Message total length exceeds buffer capacity: " + messageTotalLength);
+                    throw new IllegalStateException("(Reading) Message total length exceeds buffer capacity: " + messageTotalLength);
                 }
 
                 if (messageTotalLength > buffer.position()) {
@@ -132,10 +146,12 @@ public final class Protocol implements AutoCloseable {
                     return;
                 }
 
+                LOGGER.debug("Peer {} received message {} with length {}", getIdentity(), messageType, messagePayloadLength);
+
                 var messagePayload = buffer.asReadOnlyBuffer().limit(messageTotalLength).position(5);
 
                 try {
-                    receiveEvent.publish(new MessageImpl(messageType, messagePayload, messagePayloadLength));
+                    listener.onReceive(new MessageImpl(messageType, messagePayload, messagePayloadLength));
                 } catch (Throwable cause) {
                     throw new RuntimeException("Failed to process message", cause);
                 }
@@ -225,16 +241,18 @@ public final class Protocol implements AutoCloseable {
 
                 var messageType = pendingMessage.message.getType();
                 if (messageType == null) {
-                    throw new IllegalStateException("Message type is null");
+                    throw new IllegalStateException("(Writing) Message type is null");
                 }
 
                 var messageLength = pendingMessage.message.getLength();
                 if (messageLength < 0) {
-                    throw new IllegalStateException("Message length is negative: " + messageLength);
+                    throw new IllegalStateException("(Writing) Message length is negative: " + messageLength);
                 }
                 if (messageLength > buffer.capacity() - 5) {
-                    throw new IllegalStateException("Message length exceeds buffer capacity: " + messageLength);
+                    throw new IllegalStateException("(Writing) Message length exceeds buffer capacity: " + messageLength);
                 }
+
+                LOGGER.debug("Peer {} sending message {} with length {}", getIdentity(), messageType, messageLength);
 
                 buffer.clear();
                 buffer.putInt(messageLength + 1);
@@ -266,12 +284,19 @@ public final class Protocol implements AutoCloseable {
             }
         }
 
+        private void sendKeepAliveOnIntervalAfterDelay() {
+            if (isClosed()) {
+                return;
+            }
+            keepAliveFuture = DefaultExecutors.getScheduledExecutor().schedule(keepAliveTask, KEEPALIVE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }
+
         private void sendKeepAliveOnInterval() {
             if (isClosed()) {
                 return;
             }
             sendKeepAlive();
-            keepAliveFuture = DefaultExecutors.getScheduledExecutor().schedule(keepAliveTask, KEEPALIVE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+            sendKeepAliveOnIntervalAfterDelay();
         }
 
         private void sendKeepAlive() {
@@ -286,6 +311,7 @@ public final class Protocol implements AutoCloseable {
 
         private void writeKeepAlive() {
             try {
+                LOGGER.debug("Peer {} sending keep-alive", getIdentity());
                 buffer.clear();
                 buffer.putInt(0);
                 buffer.flip();
@@ -375,14 +401,53 @@ public final class Protocol implements AutoCloseable {
         }
     }
 
-    private void close(Throwable cause) {
+    public boolean isConnected() {
+        return connectionState.get() == 2;
+    }
+
+    private void setConnectionStateDisconnected() {
+        connectionState.set(0);
+    }
+    private void setConnectionStateConnected() {
+        connectionState.set(2);
+    }
+
+    private boolean trySetConnectionStateConnecting() {
+        return connectionState.getAndUpdate(value -> value == 0 ? 1 : value) != 0;
+    }
+
+    public boolean isClosed() {
+        if (isClosed.get()) return true;
+        if (!channel.isOpen()) {
+            close();
+            return true;
+        }
+        return false;
+    }
+
+    private void assertNotClosed() {
+        if (isClosed()) {
+            throw new IllegalStateException("Peer is closed");
+        }
+    }
+
+    private void close(@Nullable Throwable cause) {
         if (isClosed.getAndSet(true)) {
             return;
         }
 
+        setConnectionStateDisconnected();
+
         if (cause == null) {
             cause = new IllegalStateException("Peer closed");
         }
+
+        var message = cause.getMessage();
+        if (message == null) {
+            message = cause.getClass().getName();
+        }
+
+        LOGGER.debug("Peer {} closed: {}", getIdentity(), message);
 
         // Close read/write handlers
 
@@ -420,42 +485,17 @@ public final class Protocol implements AutoCloseable {
         // Publish close event
 
         try {
-            closeEvent.publish(cause);
+            listener.onClose(cause);
         } catch (Throwable ignored) {}
-    }
-
-    public boolean isClosed() {
-        if (isClosed.get()) return true;
-        if (!channel.isOpen()) {
-            close();
-            return true;
-        }
-        return false;
-    }
-
-    private void assertNotClosed() {
-        if (isClosed()) {
-            throw new IllegalStateException("Peer is closed");
-        }
     }
 
     @Override
     public void close() {
-        close(new IllegalStateException("Peer closed"));
+        close(null);
     }
 
-    private @NotNull ReadHandler getReadHandler() {
-        assertNotClosed();
-        ReadHandler readHandler;
-        synchronized (lock) {
-            readHandler = this.readHandler;
-        }
-        if (readHandler == null) {
-            throw new IllegalStateException("Peer not connected/established");
-        }
-        return readHandler;
-    }
-    private @NotNull WriteHandler getWriteHandler() {
+    public @NotNull CompletableFuture<Void> send(@NotNull Message message) {
+        Objects.requireNonNull(message, "Argument 'message'");
         assertNotClosed();
         WriteHandler writeHandler;
         synchronized (lock) {
@@ -464,12 +504,7 @@ public final class Protocol implements AutoCloseable {
         if (writeHandler == null) {
             throw new IllegalStateException("Peer not connected/established");
         }
-        return writeHandler;
-    }
-
-    public @NotNull CompletableFuture<Void> send(@NotNull Message message) {
-        Objects.requireNonNull(message, "Argument 'message'");
-        return getWriteHandler().send(message);
+        return writeHandler.send(message);
     }
 
     public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
@@ -477,6 +512,9 @@ public final class Protocol implements AutoCloseable {
             @NotNull Identity clientIdentity,
             @NotNull InetSocketAddress peerAddress
     ) {
+        if (trySetConnectionStateConnecting()) {
+            throw new IllegalStateException("Peer already connected");
+        }
         return CompletableFuture.supplyAsync(() -> {
             assertNotClosed();
 
@@ -487,6 +525,8 @@ public final class Protocol implements AutoCloseable {
                 // Write outgoing handshake
 
                 assertNotClosed();
+
+                LOGGER.debug("Peer socket {} connecting, sending request handshake", peerAddress);
 
                 /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
                 /* clientPstr          */ buffer.put(PROTOCOL_STRING);
@@ -505,6 +545,8 @@ public final class Protocol implements AutoCloseable {
 
                 assertNotClosed();
 
+                LOGGER.debug("Peer socket {} connecting, receiving response handshake", peerAddress);
+
                 timeout.start(READ_TIMEOUT_MS);
                 IO.readAll(Channels.newInputStream(channel), buffer.array(), 0, 68);
                 timeout.cancel();
@@ -516,7 +558,7 @@ public final class Protocol implements AutoCloseable {
                         PROTOCOL_STRING.length, peerPstrLen
                     ));
                 }
-                var peerPstr = new byte[PROTOCOL_STRING.length]; buffer.get(peerPstr);
+                var peerPstr = IO.toArray(buffer, PROTOCOL_STRING.length);
                 if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
                     throw new IllegalStateException(String.format(
                         "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
@@ -525,9 +567,9 @@ public final class Protocol implements AutoCloseable {
                     ));
                 }
 
-                var peerReservedBytes = new byte[8]; buffer.get(peerReservedBytes);
-                var peerInfoHashBytes = new byte[20]; buffer.get(peerInfoHashBytes);
-                var peerIdentityBytes = new byte[20]; buffer.get(peerIdentityBytes);
+                var peerReservedBytes = IO.toArray(buffer, 8);
+                var peerInfoHashBytes = IO.toArray(buffer, 20);
+                var peerIdentityBytes = IO.toArray(buffer, 20);
 
                 // Process incoming handshake and setup protocol
 
@@ -539,25 +581,36 @@ public final class Protocol implements AutoCloseable {
                     throw new IllegalStateException("Handshake infohash mismatch, expected " + infoHash + ", actual " + peerInfoHash);
                 }
 
+                var readHandler = new ReadHandler();
+                var writeHandler = new WriteHandler();
+
                 synchronized (lock) {
                     this.infoHash = infoHash;
-                    identity = peerIdentity;
-                    extensions = peerExtensions;
-                    readHandler = new ReadHandler();
-                    writeHandler = new WriteHandler();
+                    this.identity = peerIdentity;
+                    this.extensions = peerExtensions;
+                    this.readHandler = readHandler;
+                    this.writeHandler = writeHandler;
                 }
 
-                getReadHandler().readFromChannel();
-                getWriteHandler().sendKeepAliveOnInterval();
+                assertNotClosed();
 
-                connectEvent.publish(peerIdentity);
+                readHandler.readFromChannel();
+                writeHandler.sendKeepAliveOnIntervalAfterDelay();
+
+                setConnectionStateConnected();
+
+                LOGGER.debug("Peer {} socket {} connected", peerIdentity, peerAddress);
+
+                listener.onConnect(peerIdentity);
 
                 return peerIdentity;
             } catch (IOException cause) {
                 var wrappedCause = IO.wrapException(cause);
+                LOGGER.debug("Peer socket {} connection failed", peerAddress, wrappedCause);
                 close(wrappedCause);
                 throw wrappedCause;
             } catch (Throwable cause) {
+                LOGGER.debug("Peer socket {} connection failed", peerAddress, cause);
                 close(cause);
                 throw cause;
             } finally {
@@ -583,20 +636,16 @@ public final class Protocol implements AutoCloseable {
         }
     }
 
-    public @NotNull Event<@NotNull Identity> getConnectEvent() {
-        return connectEvent;
-    }
-    public @NotNull Event<@NotNull Throwable> getCloseEvent() {
-        return closeEvent;
-    }
-
-    public @NotNull Event<@NotNull MessageImpl> getReceiveEvent() {
-        return receiveEvent;
-    }
-
     @Override
     public String toString() {
-        return "Protocol{infoHash=" + getInfoHash() + ", identity=" + getIdentity() + ", extensions=" + getExtensions() + ", isClosed=" + isClosed() + "}";
+        synchronized (lock) {
+            return new StringJoiner(", ", "Protocol{", "}")
+                    .add("infoHash=" + infoHash)
+                    .add("identity=" + identity)
+                    .add("extensions=" + extensions)
+                    .add("isClosed=" + isClosed())
+                    .toString();
+        }
     }
 
 }

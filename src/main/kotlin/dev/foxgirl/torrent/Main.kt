@@ -3,6 +3,8 @@ package dev.foxgirl.torrent
 import dev.foxgirl.torrent.bencode.*
 import dev.foxgirl.torrent.client.*
 import dev.foxgirl.torrent.metainfo.MetaInfo
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.RandomAccessFile
@@ -18,6 +20,30 @@ import java.util.*
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicInteger
 
+fun main() {
+
+    System.setProperty(org.slf4j.impl.SimpleLogger.DEFAULT_LOG_LEVEL_KEY, "TRACE")
+
+    val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
+
+    println("downloading torrent: $metainfo")
+
+    val swarm = Swarm(Identity.generateDefault(InetSocketAddress(InetAddress.getLocalHost(), 8008)))
+
+    swarm.addTorrent(metainfo.info)
+
+    val peerAddress = InetSocketAddress(InetAddress.getLocalHost(), 51413)
+    val peerChannel = AsynchronousSocketChannel.open()
+    val peer = Peer(swarm, peerChannel)
+
+    peerChannel.connect(peerAddress)
+    peer.protocol.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
+
+    Thread.sleep(8000)
+
+}
+
+/*
 fun main() {
 
     val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
@@ -122,6 +148,7 @@ fun main() {
     println("done!")
 
 }
+*/
 
 fun main1() {
 

@@ -295,6 +295,10 @@ public final class Info extends InfoContainer {
         return pieces;
     }
 
+    public int getPieceCount() {
+        return pieces.size();
+    }
+
     public long getPieceLength() {
         return pieceLength;
     }
