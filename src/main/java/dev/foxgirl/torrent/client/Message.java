@@ -34,7 +34,7 @@ public abstract class Message {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return "Message{type=" + getType() + ", length=" + getLength() + "}";
     }
 

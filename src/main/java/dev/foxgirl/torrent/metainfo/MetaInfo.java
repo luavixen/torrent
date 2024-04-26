@@ -323,7 +323,7 @@ public final class MetaInfo extends InfoContainer {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return new StringJoiner(", ", "MetaInfo{", "}")
                 .add("info=" + info)
                 .add(announce == null ? "announce=null" : "announce='" + announce + "'")

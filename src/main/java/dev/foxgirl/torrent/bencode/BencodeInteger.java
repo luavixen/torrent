@@ -45,7 +45,7 @@ public final class BencodeInteger implements BencodePrimitive, Comparable<Bencod
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return Long.toString(value);
     }
 

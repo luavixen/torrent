@@ -85,7 +85,7 @@ public final class FileInfo extends InfoContainer {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return new StringJoiner(", ", "InfoFile{", "}")
                 .add("path=" + path)
                 .add("length=" + length)

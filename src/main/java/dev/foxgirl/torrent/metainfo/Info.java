@@ -324,7 +324,7 @@ public final class Info extends InfoContainer {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return new StringJoiner(", ", "Info{", "}")
                 .add("name='" + name + "'")
                 .add("pieces=" + pieces.size())

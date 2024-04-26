@@ -18,17 +18,14 @@ import java.nio.channels.Channels;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Protocol implements AutoCloseable {
 
     public interface Listener {
-        void onReceive(@NotNull MessageImpl message);
+        void onReceive(@NotNull MessageImpl message) throws Exception;
         void onConnect(@NotNull Identity identity);
         void onClose(@NotNull Throwable cause);
     }
@@ -47,10 +44,7 @@ public final class Protocol implements AutoCloseable {
 
     private static final byte[] PROTOCOL_STRING = "BitTorrent protocol".getBytes(StandardCharsets.ISO_8859_1);
 
-    private static final Extensions SUPPORTED_EXTENSIONS = new Extensions();
-    static {
-        SUPPORTED_EXTENSIONS.setFastPeers(true);
-    }
+    private static final Extensions SUPPORTED_EXTENSIONS = Extensions.getSupportedExtensions();
 
     private static final long READ_TIMEOUT_MS = 120 * 1000;
     private static final long WRITE_TIMEOUT_MS = 30 * 1000;
@@ -152,8 +146,10 @@ public final class Protocol implements AutoCloseable {
 
                 try {
                     listener.onReceive(new MessageImpl(messageType, messagePayload, messagePayloadLength));
+                } catch (IllegalStateException cause) {
+                    throw new IllegalStateException("(Reading)" + cause.getMessage(), cause);
                 } catch (Throwable cause) {
-                    throw new RuntimeException("Failed to process message", cause);
+                    throw new RuntimeException("(Reading) Failed to process message", cause);
                 }
 
                 int remainingOffset = messageTotalLength;
@@ -447,7 +443,11 @@ public final class Protocol implements AutoCloseable {
             message = cause.getClass().getName();
         }
 
-        LOGGER.debug("Peer {} closed: {}", getIdentity(), message);
+        LOGGER.info("Peer {} closed: {}", getIdentity(), message);
+
+        if (!(cause instanceof IllegalStateException) && !(cause instanceof TimeoutException)) {
+            LOGGER.debug("Peer {} closed with unexpected exception", getIdentity(), cause);
+        }
 
         // Close read/write handlers
 
@@ -507,11 +507,27 @@ public final class Protocol implements AutoCloseable {
         return writeHandler.send(message);
     }
 
-    public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
-            @NotNull Hash infoHash,
-            @NotNull Identity clientIdentity,
-            @NotNull InetSocketAddress peerAddress
-    ) {
+    private static final class EstablishIncomingHandshake {
+        private final @NotNull Extensions peerExtensions;
+        private final @NotNull Hash peerInfoHash;
+        private final @NotNull Identity peerIdentity;
+
+        private EstablishIncomingHandshake(
+                @NotNull Extensions peerExtensions,
+                @NotNull Hash peerInfoHash,
+                @NotNull Identity peerIdentity
+        ) {
+            this.peerExtensions = peerExtensions;
+            this.peerInfoHash = peerInfoHash;
+            this.peerIdentity = peerIdentity;
+        }
+    }
+
+    private interface EstablishCallback {
+        @NotNull EstablishIncomingHandshake establish(@NotNull ByteBuffer buffer, @NotNull Timeout timeout) throws Throwable;
+    }
+
+    private @NotNull CompletableFuture<@NotNull Identity> establish(@NotNull InetSocketAddress peerAddress, @NotNull EstablishCallback callback) {
         if (trySetConnectionStateConnecting()) {
             throw new IllegalStateException("Peer already connected");
         }
@@ -522,72 +538,15 @@ public final class Protocol implements AutoCloseable {
             var timeout = new Timeout(() -> close(new TimeoutException("Handshake timed out")));
 
             try {
-                // Write outgoing handshake
-
-                assertNotClosed();
-
-                LOGGER.debug("Peer socket {} connecting, sending request handshake", peerAddress);
-
-                /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
-                /* clientPstr          */ buffer.put(PROTOCOL_STRING);
-                /* clientReservedBytes */ buffer.put(SUPPORTED_EXTENSIONS.getBits());
-                /* clientInfoHashBytes */ buffer.put(infoHash.getBytes());
-                /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
-                buffer.flip();
-
-                timeout.start(WRITE_TIMEOUT_MS);
-                Channels.newOutputStream(channel).write(buffer.array(), 0, buffer.limit());
-                timeout.cancel();
-
-                buffer.clear();
-
-                // Read incoming handshake
-
-                assertNotClosed();
-
-                LOGGER.debug("Peer socket {} connecting, receiving response handshake", peerAddress);
-
-                timeout.start(READ_TIMEOUT_MS);
-                IO.readAll(Channels.newInputStream(channel), buffer.array(), 0, 68);
-                timeout.cancel();
-
-                var peerPstrLen = buffer.get();
-                if (peerPstrLen != PROTOCOL_STRING.length) {
-                    throw new IllegalStateException(String.format(
-                        "Handshake protocol string length mismatch, expected %d, actual %d",
-                        PROTOCOL_STRING.length, peerPstrLen
-                    ));
-                }
-                var peerPstr = IO.toArray(buffer, PROTOCOL_STRING.length);
-                if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
-                    throw new IllegalStateException(String.format(
-                        "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
-                        new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
-                        new String(peerPstr, StandardCharsets.ISO_8859_1)
-                    ));
-                }
-
-                var peerReservedBytes = IO.toArray(buffer, 8);
-                var peerInfoHashBytes = IO.toArray(buffer, 20);
-                var peerIdentityBytes = IO.toArray(buffer, 20);
-
-                // Process incoming handshake and setup protocol
-
-                var peerExtensions = new Extensions(peerReservedBytes);
-                var peerInfoHash = Hash.of(peerInfoHashBytes);
-                var peerIdentity = new Identity(peerIdentityBytes, peerAddress);
-
-                if (!Objects.equals(infoHash, peerInfoHash)) {
-                    throw new IllegalStateException("Handshake infohash mismatch, expected " + infoHash + ", actual " + peerInfoHash);
-                }
+                var peerHandshake = callback.establish(buffer, timeout);
 
                 var readHandler = new ReadHandler();
                 var writeHandler = new WriteHandler();
 
                 synchronized (lock) {
-                    this.infoHash = infoHash;
-                    this.identity = peerIdentity;
-                    this.extensions = peerExtensions;
+                    this.infoHash = peerHandshake.peerInfoHash;
+                    this.identity = peerHandshake.peerIdentity;
+                    this.extensions = peerHandshake.peerExtensions;
                     this.readHandler = readHandler;
                     this.writeHandler = writeHandler;
                 }
@@ -599,24 +558,122 @@ public final class Protocol implements AutoCloseable {
 
                 setConnectionStateConnected();
 
-                LOGGER.debug("Peer {} socket {} connected", peerIdentity, peerAddress);
+                LOGGER.debug("Peer {} socket {} connected", peerHandshake.peerIdentity, peerAddress);
+                LOGGER.info("Peer {} connected", peerHandshake.peerIdentity);
 
-                listener.onConnect(peerIdentity);
+                listener.onConnect(peerHandshake.peerIdentity);
 
-                return peerIdentity;
-            } catch (IOException cause) {
-                var wrappedCause = IO.wrapException(cause);
-                LOGGER.debug("Peer socket {} connection failed", peerAddress, wrappedCause);
-                close(wrappedCause);
-                throw wrappedCause;
+                return peerHandshake.peerIdentity;
             } catch (Throwable cause) {
-                LOGGER.debug("Peer socket {} connection failed", peerAddress, cause);
+                LOGGER.info("Peer socket {} connection failed", peerAddress, cause);
                 close(cause);
-                throw cause;
+                throw cause instanceof RuntimeException ? (RuntimeException) cause : new CompletionException(cause);
             } finally {
                 timeout.cancel();
             }
         }, DefaultExecutors.getIOExecutor());
+    }
+
+    private EstablishIncomingHandshake establishReadIncomingHandshake(
+            @NotNull InetSocketAddress peerAddress,
+            @NotNull ByteBuffer buffer,
+            @NotNull Timeout timeout,
+            @Nullable Hash infoHash
+    ) throws IOException {
+        // Read incoming handshake
+
+        assertNotClosed();
+
+        LOGGER.debug("Peer socket {} connecting, receiving response handshake", peerAddress);
+
+        timeout.start(READ_TIMEOUT_MS);
+        IO.readAll(Channels.newInputStream(channel), buffer.array(), 0, 68);
+        timeout.cancel();
+
+        var peerPstrLen = buffer.get();
+        if (peerPstrLen != PROTOCOL_STRING.length) {
+            throw new IllegalStateException(String.format(
+                "Handshake protocol string length mismatch, expected %d, actual %d",
+                PROTOCOL_STRING.length, peerPstrLen
+            ));
+        }
+        var peerPstr = IO.getArray(buffer, PROTOCOL_STRING.length);
+        if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
+            throw new IllegalStateException(String.format(
+                "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
+                new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
+                new String(peerPstr, StandardCharsets.ISO_8859_1)
+            ));
+        }
+
+        var peerReservedBytes = IO.getArray(buffer, 8);
+        var peerInfoHashBytes = IO.getArray(buffer, 20);
+        var peerIdentityBytes = IO.getArray(buffer, 20);
+
+        // Process incoming handshake and setup protocol
+
+        var peerExtensions = new Extensions(peerReservedBytes);
+        var peerInfoHash = Hash.of(peerInfoHashBytes);
+        var peerIdentity = new Identity(peerIdentityBytes, peerAddress);
+
+        if (infoHash != null && !Objects.equals(infoHash, peerInfoHash)) {
+            throw new IllegalStateException("Handshake infohash mismatch, expected " + infoHash + ", actual " + peerInfoHash);
+        }
+
+        return new EstablishIncomingHandshake(peerExtensions, peerInfoHash, peerIdentity);
+    }
+
+    private void establishWriteOutgoingHandshake(
+            @NotNull InetSocketAddress peerAddress,
+            @NotNull ByteBuffer buffer,
+            @NotNull Timeout timeout,
+            @NotNull Hash infoHash,
+            @NotNull Identity clientIdentity
+    ) throws IOException {
+        // Write outgoing handshake
+
+        assertNotClosed();
+
+        LOGGER.debug("Peer socket {} connecting, sending request handshake", peerAddress);
+
+        /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
+        /* clientPstr          */ buffer.put(PROTOCOL_STRING);
+        /* clientReservedBytes */ buffer.put(SUPPORTED_EXTENSIONS.getBits());
+        /* clientInfoHashBytes */ buffer.put(infoHash.getBytes());
+        /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
+        buffer.flip();
+
+        timeout.start(WRITE_TIMEOUT_MS);
+        Channels.newOutputStream(channel).write(buffer.array(), 0, buffer.limit());
+        timeout.cancel();
+
+        buffer.clear();
+    }
+
+    public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
+            @NotNull Hash infoHash,
+            @NotNull Identity clientIdentity,
+            @NotNull InetSocketAddress peerAddress
+    ) {
+        Objects.requireNonNull(infoHash, "Argument 'infoHash'");
+        Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
+        Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
+        return establish(peerAddress, (buffer, timeout) -> {
+            establishWriteOutgoingHandshake(peerAddress, buffer, timeout, infoHash, clientIdentity);
+            return establishReadIncomingHandshake(peerAddress, buffer, timeout, infoHash);
+        });
+    }
+    public @NotNull CompletableFuture<@NotNull Identity> establishIncoming(
+            @NotNull Identity clientIdentity,
+            @NotNull InetSocketAddress peerAddress
+    ) {
+        Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
+        Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
+        return establish(peerAddress, (buffer, timeout) -> {
+            var peerHandshake = establishReadIncomingHandshake(peerAddress, buffer, timeout, infoHash);
+            establishWriteOutgoingHandshake(peerAddress, buffer, timeout, peerHandshake.peerInfoHash, clientIdentity);
+            return peerHandshake;
+        });
     }
 
     public @Nullable Hash getInfoHash() {
@@ -637,14 +694,12 @@ public final class Protocol implements AutoCloseable {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         synchronized (lock) {
-            return new StringJoiner(", ", "Protocol{", "}")
-                    .add("infoHash=" + infoHash)
-                    .add("identity=" + identity)
-                    .add("extensions=" + extensions)
-                    .add("isClosed=" + isClosed())
-                    .toString();
+            return String.format(
+                "Protocol{infoHash=%s, identity=%s, extensions=%s, isClosed=%s}",
+                infoHash, identity, extensions, isClosed()
+            );
         }
     }
 

@@ -66,7 +66,7 @@ public final class Timeout {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return "Timeout{action=" + action + "}";
     }
 

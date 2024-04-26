@@ -117,4 +117,9 @@ public final class BencodeMap extends TreeMap<@NotNull BencodeString, @NotNull B
         return this;
     }
 
+    @Override
+    public @NotNull String toString() {
+        return super.toString();
+    }
+
 }

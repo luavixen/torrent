@@ -61,4 +61,8 @@ public final class BencodeList extends ArrayList<BencodeElement> implements Benc
         return this;
     }
 
+    @Override
+    public @NotNull String toString() {
+        return super.toString();
+    }
 }

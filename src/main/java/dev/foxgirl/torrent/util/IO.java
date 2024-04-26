@@ -42,7 +42,7 @@ public final class IO {
         return buffer;
     }
 
-    public static byte @NotNull [] toArray(@NotNull ByteBuffer buffer, int length) {
+    public static byte @NotNull [] getArray(@NotNull ByteBuffer buffer, int length) {
         Objects.requireNonNull(buffer, "Argument 'buffer'");
         if (length < 0) {
             throw new IllegalArgumentException("Length is negative");
@@ -54,9 +54,56 @@ public final class IO {
         return array;
     }
 
-    public static byte @NotNull [] toArray(@NotNull ByteBuffer buffer) {
+    public static byte @NotNull [] getArray(@NotNull ByteBuffer buffer) {
         Objects.requireNonNull(buffer, "Argument 'buffer'");
-        return toArray(buffer, buffer.remaining());
+        return getArray(buffer, buffer.remaining());
+    }
+
+    public static @NotNull InputStream getInputStream(@NotNull ByteBuffer buffer) {
+        Objects.requireNonNull(buffer, "Argument 'buffer'");
+        return new InputStream() {
+            @Override
+            public int available() {
+                return buffer.remaining();
+            }
+            @Override
+            public int read() {
+                return buffer.hasRemaining() ? buffer.get() & 0xFF : -1;
+            }
+            @Override
+            public int read(byte @NotNull [] bytes, int offset, int length) {
+                int count = Math.min(length, buffer.remaining());
+                buffer.get(bytes, offset, count);
+                return count;
+            }
+            @Override
+            public byte[] readAllBytes() {
+                return getArray(buffer);
+            }
+            @Override
+            public byte[] readNBytes(int length) {
+                return getArray(buffer, Math.min(length, buffer.remaining()));
+            }
+            @Override
+            public int readNBytes(byte[] b, int off, int len) {
+                int n = read(b, off, len);
+                return n == -1 ? 0 : n;
+            }
+        };
+    }
+
+    public static @NotNull OutputStream getOutputStream(@NotNull ByteBuffer buffer) {
+        Objects.requireNonNull(buffer, "Argument 'buffer'");
+        return new OutputStream() {
+            @Override
+            public void write(int b) {
+                buffer.put((byte) b);
+            }
+            @Override
+            public void write(byte @NotNull [] bytes, int offset, int length) {
+                buffer.put(bytes, offset, length);
+            }
+        };
     }
 
     public static @NotNull RuntimeException wrapException(@NotNull Exception cause) {

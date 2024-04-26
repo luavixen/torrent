@@ -43,4 +43,10 @@ public final class DefaultExecutors {
         return SCHEDULED_EXECUTOR_SERVICE;
     }
 
+    public static void shutdown() {
+        DEFAULT_EXECUTOR_SERVICE.shutdown();
+        IO_EXECUTOR_SERVICE.shutdown();
+        SCHEDULED_EXECUTOR_SERVICE.shutdown();
+    }
+
 }

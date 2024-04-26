@@ -18,7 +18,8 @@ public enum MessageType {
     HAVE_NONE(15),
     SUGGEST_PIECE(13),
     REJECT_REQUEST(16),
-    ALLOWED_FAST(17);
+    ALLOWED_FAST(17),
+    EXTENDED(20);
 
     private final byte id;
 

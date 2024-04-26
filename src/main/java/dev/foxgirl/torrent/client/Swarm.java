@@ -10,19 +10,24 @@ import java.util.*;
 public final class Swarm {
 
     private final @NotNull Identity identity;
+    private final @NotNull Extensions extensions;
 
     private final Object lock = new Object();
 
     private final Set<Peer> peers = new LinkedHashSet<>(200);
-    private final Map<Hash, Info> torrents = new HashMap<>(32);
+    private final Map<Hash, Info> torrents = new LinkedHashMap<>(32);
 
     public Swarm(@NotNull Identity identity) {
         Objects.requireNonNull(identity, "Argument 'identity'");
         this.identity = identity;
+        this.extensions = Extensions.getSupportedExtensions();
     }
 
     public @NotNull Identity getIdentity() {
         return identity;
+    }
+    public @NotNull Extensions getExtensions() {
+        return new Extensions(extensions);
     }
 
     public @Nullable Info getInfo(@Nullable Hash infoHash) {
@@ -34,7 +39,7 @@ public final class Swarm {
         }
     }
 
-    public boolean addTorrent(@NotNull Info info) {
+    public boolean addInfo(@NotNull Info info) {
         Objects.requireNonNull(info, "Argument 'info'");
         synchronized (lock) {
             return torrents.put(info.getHash(), info) == null;
@@ -52,6 +57,14 @@ public final class Swarm {
         synchronized (lock) {
             return peers.remove(peer);
         }
+    }
+
+    @Override
+    public @NotNull String toString() {
+        return String.format(
+            "Swarm{identity=%s, peers=%d, torrents=%d}",
+            identity, peers.size(), torrents.size()
+        );
     }
 
 }

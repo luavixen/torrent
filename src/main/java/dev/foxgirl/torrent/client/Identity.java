@@ -12,35 +12,31 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public final class Identity {
 
-    private static final String DEFAULT_PREFIX = "-VX1000-";
+    private static final String DEFAULT_PREFIX = "-LV1000-";
     private static final byte[] DEFAULT_PREFIX_BYTES = DEFAULT_PREFIX.getBytes(StandardCharsets.ISO_8859_1);
 
-    public static @NotNull Identity generateDefault(@NotNull InetSocketAddress address) {
+    public static @NotNull Identity generateDefault(@NotNull InetSocketAddress socketAddress) {
         var random = ThreadLocalRandom.current();
         var buffer = ByteBuffer.allocate(20).put(DEFAULT_PREFIX_BYTES);
         while (buffer.hasRemaining()) {
             buffer.put((byte) random.nextInt('0', '9' + 1));
         }
-        return new Identity(buffer.array(), address);
+        return new Identity(buffer.array(), socketAddress);
     }
 
     private final byte[] id;
     private final String idString;
 
-    private final InetSocketAddress address;
+    private final InetSocketAddress socketAddress;
 
-    public Identity(@NotNull String id, @NotNull InetSocketAddress address) {
-        this(id.getBytes(StandardCharsets.ISO_8859_1), address);
-    }
-
-    public Identity(byte @NotNull [] id, @NotNull InetSocketAddress address) {
+    public Identity(byte @NotNull [] id, @NotNull InetSocketAddress socketAddress) {
         Objects.requireNonNull(id, "Argument 'id'");
-        Objects.requireNonNull(address, "Argument 'address'");
+        Objects.requireNonNull(socketAddress, "Argument 'socketAddress'");
         if (id.length != 20) {
             throw new IllegalArgumentException("ID length is not 20");
         }
         this.idString = formatID(this.id = id.clone());
-        this.address = address;
+        this.socketAddress = socketAddress;
     }
 
     private static String formatID(byte[] id) {
@@ -67,24 +63,26 @@ public final class Identity {
         return idString;
     }
 
-    public @NotNull InetSocketAddress getAddress() {
-        return address;
+    public @NotNull InetSocketAddress getSocketAddress() {
+        return socketAddress;
     }
 
     @Override
-    public String toString() {
-        String addressString;
-        if (address.getAddress() instanceof Inet6Address) {
-            addressString = "[" + address.getAddress().getHostAddress() + "]:" + address.getPort();
-        } else {
-            addressString = address.getAddress().getHostAddress() + ":" + address.getPort();
+    public @NotNull String toString() {
+        var address = getSocketAddress().getAddress();
+        if (address == null) {
+            return idString + "@" + socketAddress;
         }
-        return idString + "@" + addressString;
+        if (address instanceof Inet6Address) {
+            return idString + "@[" + address.getHostAddress() + "]:" + socketAddress.getPort();
+        } else {
+            return idString + "@" + address.getHostAddress() + ":" + socketAddress.getPort();
+        }
     }
 
     @Override
     public int hashCode() {
-        return 31 * Arrays.hashCode(id) + address.hashCode();
+        return 31 * Arrays.hashCode(id) + socketAddress.hashCode();
     }
 
     @Override
@@ -92,7 +90,7 @@ public final class Identity {
         if (obj == this) return true;
         if (obj == null || obj.getClass() != getClass()) return false;
         var that = (Identity) obj;
-        return Arrays.equals(id, that.id) && address.equals(that.address);
+        return Arrays.equals(id, that.id) && socketAddress.equals(that.socketAddress);
     }
 
 }

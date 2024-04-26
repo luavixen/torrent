@@ -3,26 +3,25 @@ package dev.foxgirl.torrent
 import dev.foxgirl.torrent.bencode.*
 import dev.foxgirl.torrent.client.*
 import dev.foxgirl.torrent.metainfo.MetaInfo
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
+import dev.foxgirl.torrent.util.DefaultExecutors
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.RandomAccessFile
 import java.lang.Exception
 import java.net.*
 import java.nio.ByteBuffer
 import java.nio.channels.AsynchronousSocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
-import java.util.*
 import java.util.concurrent.*
-import java.util.concurrent.atomic.AtomicInteger
+import kotlin.experimental.or
 
 fun main() {
 
     System.setProperty(org.slf4j.impl.SimpleLogger.DEFAULT_LOG_LEVEL_KEY, "TRACE")
+    System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_DATE_TIME_KEY, "false")
+    System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_THREAD_NAME_KEY, "false")
+    System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_LOG_NAME_KEY, "false")
 
     val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
 
@@ -30,16 +29,20 @@ fun main() {
 
     val swarm = Swarm(Identity.generateDefault(InetSocketAddress(InetAddress.getLocalHost(), 8008)))
 
-    swarm.addTorrent(metainfo.info)
+    swarm.addInfo(metainfo.info)
 
     val peerAddress = InetSocketAddress(InetAddress.getLocalHost(), 51413)
     val peerChannel = AsynchronousSocketChannel.open()
     val peer = Peer(swarm, peerChannel)
 
     peerChannel.connect(peerAddress)
-    peer.protocol.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
+    peer.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
 
     Thread.sleep(8000)
+
+    peer.close()
+
+    DefaultExecutors.shutdown()
 
 }
 

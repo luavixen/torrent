@@ -1,5 +1,7 @@
 package dev.foxgirl.torrent.bencode;
 
+import org.jetbrains.annotations.NotNull;
+
 public enum BencodeType {
 
     INTEGER,
@@ -21,7 +23,7 @@ public enum BencodeType {
     }
 
     @Override
-    public String toString() {
+    public @NotNull String toString() {
         return switch (this) {
             case INTEGER -> "integer";
             case STRING -> "string";
