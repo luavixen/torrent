@@ -1,20 +1,20 @@
 package dev.foxgirl.torrent
 
 import dev.foxgirl.torrent.bencode.*
-import dev.foxgirl.torrent.client.*
+import dev.foxgirl.torrent.client.Identity
+import dev.foxgirl.torrent.client.Peer
+import dev.foxgirl.torrent.client.Swarm
 import dev.foxgirl.torrent.metainfo.MetaInfo
 import dev.foxgirl.torrent.util.DefaultExecutors
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.lang.Exception
 import java.net.*
 import java.nio.ByteBuffer
 import java.nio.channels.AsynchronousSocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
-import java.util.concurrent.*
-import kotlin.experimental.or
+import java.util.concurrent.ThreadLocalRandom
 
 fun main() {
 
@@ -25,11 +25,9 @@ fun main() {
 
     val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
 
-    println("downloading torrent: $metainfo")
-
     val swarm = Swarm(Identity.generateDefault(InetSocketAddress(InetAddress.getLocalHost(), 8008)))
 
-    swarm.addInfo(metainfo.info)
+    swarm.addTorrent(metainfo.info)
 
     val peerAddress = InetSocketAddress(InetAddress.getLocalHost(), 51413)
     val peerChannel = AsynchronousSocketChannel.open()
@@ -37,11 +35,11 @@ fun main() {
 
     peerChannel.connect(peerAddress)
     peer.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
+    peer.downloadTest().get()
 
     Thread.sleep(8000)
 
     peer.close()
-
     DefaultExecutors.shutdown()
 
 }

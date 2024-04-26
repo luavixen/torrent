@@ -1,19 +1,22 @@
 package dev.foxgirl.torrent.client;
 
 import dev.foxgirl.torrent.bencode.BencodeDecoder;
-import dev.foxgirl.torrent.bencode.BencodeElement;
 import dev.foxgirl.torrent.bencode.BencodeEncoder;
-import dev.foxgirl.torrent.bencode.BencodeType;
 import dev.foxgirl.torrent.metainfo.Info;
+import dev.foxgirl.torrent.util.DefaultExecutors;
 import dev.foxgirl.torrent.util.Hash;
 import dev.foxgirl.torrent.util.IO;
+import dev.foxgirl.torrent.util.Timeout;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousByteChannel;
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Objects;
@@ -28,16 +31,16 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
 
     private boolean isReady = false;
 
-    private List<byte[]> infoParts;
+    private Torrent torrent;
 
-    private Info info;
-    private BitSet peerBitfield;
-    private BitSet clientBitfield;
+    private BitField bitfield;
 
-    private boolean isPeerChoking = true;
-    private boolean isPeerInterested = false;
+    private RandomAccessFile outputFileForTesting;
+
     private boolean isClientChoking = true;
     private boolean isClientInterested = false;
+    private boolean isPeerChoking = true;
+    private boolean isPeerInterested = false;
 
     public Peer(@NotNull Swarm swarm, @NotNull AsynchronousByteChannel channel) {
         Objects.requireNonNull(swarm, "Argument 'swarm'");
@@ -89,6 +92,28 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
         return extensions;
     }
 
+    public @NotNull Torrent getTorrent() {
+        synchronized (lock) {
+            return torrent;
+        }
+    }
+    public @NotNull Info getInfo() {
+        return getTorrent().getInfo();
+    }
+
+    public @NotNull BitField getClientBitField() {
+        return getTorrent().getBitField();
+    }
+    public @NotNull BitField getPeerBitField() {
+        synchronized (lock) {
+            return bitfield;
+        }
+    }
+
+    public boolean isReady() {
+        return isReady;
+    }
+
     @Override
     public void close() {
         protocol.close();
@@ -96,74 +121,151 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Protocol.class);
 
-    private void setup(Info info) {
+    private void setup(Torrent torrent) {
         synchronized (lock) {
-            this.info = info;
-            peerBitfield = new BitSet(info.getPieceCount());
-            clientBitfield = new BitSet(info.getPieceCount());
+            this.isReady = true;
+            this.torrent = torrent;
+            this.bitfield = new BitField(torrent.getInfo());
+            try {
+                outputFileForTesting = new RandomAccessFile(torrent.getInfo().getName(), "rw");
+                outputFileForTesting.setLength(torrent.getInfo().getTotalLength());
+            } catch (IOException cause) {
+                throw new RuntimeException(cause);
+            }
         }
-        LOGGER.info("Peer {} is ready with infohash {}", getPeerIdentity(), info.getHash());
+        LOGGER.info("Peer {} ready with infohash {}", getPeerIdentity(), torrent.getInfoHash());
+    }
+
+    public @NotNull CompletableFuture<Void> downloadTest() {
+        return CompletableFuture
+                .completedFuture(null)
+                .thenCompose((ignored) -> {
+                    var future = new CompletableFuture<Void>(); new Timeout(() -> future.complete(null)).start(2000);
+                    return future;
+                })
+                .thenCompose((ignored) -> setChoking(false))
+                .thenCompose((ignored) -> setInterested(true))
+                .thenCompose((ignored) -> CompletableFuture.runAsync(() -> {
+                    while (true) {
+                        synchronized (lock) {
+                            if (!isPeerChoking) return;
+                        }
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException cause) {
+                            throw new RuntimeException(cause);
+                        }
+                    }
+                }, DefaultExecutors.getIOExecutor()))
+                .thenCompose((ignored) -> {
+                    var futures = new ArrayList<CompletableFuture<Void>>();
+                    for (int i = 0; i < getInfo().getPieceCount(); i++) {
+                        int pieceLength;
+                        if (i == getInfo().getPieceCount() - 1) {
+                            pieceLength = (int) (getInfo().getTotalLength() % getInfo().getPieceLength());
+                        } else {
+                            pieceLength = (int) (getInfo().getPieceLength());
+                        }
+                        int pieceOffset = 0;
+                        while (pieceOffset < pieceLength) {
+                            int blockLength = Math.min(16384, pieceLength - pieceOffset);
+                            var payload = ByteBuffer.allocate(12).putInt(i).putInt(pieceOffset).putInt(blockLength).flip();
+                            futures.add(protocol.send(new MessageImpl(MessageType.REQUEST, payload)));
+                            pieceOffset += blockLength;
+                        }
+                    }
+                    return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+                });
+    }
+
+    private @NotNull CompletableFuture<Void> setChoking(boolean isChoking) {
+        synchronized (lock) {
+            if (isClientChoking != isChoking) {
+                isClientChoking = isChoking;
+                LOGGER.debug("Peer {} setting to {}", getPeerIdentity(), isChoking ? "choked" : "unchoked");
+                return protocol.send(new MessageImpl(isChoking ? MessageType.CHOKE : MessageType.UNCHOKE));
+            } else {
+                return CompletableFuture.completedFuture(null);
+            }
+        }
+    }
+    private @NotNull CompletableFuture<Void> setInterested(boolean isInterested) {
+        synchronized (lock) {
+            if (isClientInterested != isInterested) {
+                isClientInterested = isInterested;
+                LOGGER.debug("Peer {} setting to {}", getPeerIdentity(), isInterested ? "interested" : "not interested");
+                return protocol.send(new MessageImpl(isInterested ? MessageType.INTERESTED : MessageType.NOT_INTERESTED));
+            } else {
+                return CompletableFuture.completedFuture(null);
+            }
+        }
     }
 
     @Override
-    public synchronized void onReceive(@NotNull MessageImpl message) throws Exception {
-        switch (message.getType()) {
-            case CHOKE -> {
-                synchronized (lock) { isPeerChoking = true; }
-                LOGGER.debug("Peer {} choked us", getPeerIdentity());
-            }
-            case UNCHOKE -> {
-                synchronized (lock) { isPeerChoking = false; }
-                LOGGER.debug("Peer {} unchoked us", getPeerIdentity());
-            }
-            case INTERESTED -> {
-                synchronized (lock) { isPeerInterested = true; }
-                LOGGER.debug("Peer {} is interested in us", getPeerIdentity());
-            }
-            case NOT_INTERESTED -> {
-                synchronized (lock) { isPeerInterested = false; }
-                LOGGER.debug("Peer {} is not interested in us", getPeerIdentity());
-            }
-            case HAVE -> {
-                int pieceIndex = message.getPayload().getInt();
-                if (pieceIndex < 0 || pieceIndex >= info.getPieceCount()) {
-                    throw new IllegalStateException("Invalid piece index, expected [0, " + info.getPieceCount() + "), actual " + pieceIndex);
+    public void onReceive(@NotNull MessageImpl message) throws Exception {
+        synchronized (lock) {
+            switch (message.getType()) {
+                case CHOKE -> {
+                    isPeerChoking = true;
+                    LOGGER.debug("Peer {} choked us", getPeerIdentity());
                 }
-                synchronized (lock) {
-                    peerBitfield.set(pieceIndex);
+                case UNCHOKE -> {
+                    isPeerChoking = false;
+                    LOGGER.debug("Peer {} unchoked us", getPeerIdentity());
                 }
-                LOGGER.debug("Peer {} has piece {}, {}%", getPeerIdentity(), pieceIndex, peerBitfield.cardinality() * 100 / info.getPieceCount());
-            }
-            case BITFIELD -> {
-                int expectedByteCount = (info.getPieceCount() + 7) / 8;
-                int actualByteCount = message.getPayload().remaining();
-                if (actualByteCount != expectedByteCount) {
-                    throw new IllegalStateException("Invalid bitfield length, expected " + expectedByteCount + ", actual " + actualByteCount);
+                case INTERESTED -> {
+                    isPeerInterested = true;
+                    LOGGER.debug("Peer {} interested in us", getPeerIdentity());
                 }
-                peerBitfield.or(BitSet.valueOf(message.getPayload()));
-                LOGGER.debug("Peer {} updated the bitfield, {}%", getPeerIdentity(), peerBitfield.cardinality() * 100 / info.getPieceCount());
-            }
-            case HAVE_ALL -> {
-                synchronized (lock) {
-                    peerBitfield.set(0, info.getPieceCount());
+                case NOT_INTERESTED -> {
+                    isPeerInterested = false;
+                    LOGGER.debug("Peer {} not interested in us", getPeerIdentity());
                 }
-                LOGGER.debug("Peer {} has all pieces", getPeerIdentity());
-            }
-            case HAVE_NONE -> {
-                synchronized (lock) {
-                    peerBitfield.clear();
+                case HAVE -> {
+                    int pieceIndex = message.getPayload().getInt();
+                    if (pieceIndex < 0 || pieceIndex >= getInfo().getPieceCount()) {
+                        throw new IllegalStateException("Invalid piece index, expected [0, " + getInfo().getPieceCount() + "), actual " + pieceIndex);
+                    }
+                    bitfield.set(pieceIndex);
+                    LOGGER.debug("Peer {} has piece {}, {}%", getPeerIdentity(), pieceIndex, bitfield.getPercentageInteger());
                 }
-                LOGGER.debug("Peer {} has no pieces", getPeerIdentity());
-            }
-            case EXTENDED -> {
-                var messageID = message.getPayload().get();
-                if (messageID == 0) {
-                    var handshakeStream = IO.getInputStream(message.getPayload());
-                    var handshake = BencodeDecoder.decodeFromStream(handshakeStream);
-                    getPeerExtensions().fromHandshake(handshake);
-                    LOGGER.debug("Peer {} sent an extended handshake: {}", getPeerIdentity(), handshake);
-                } else {
-                    LOGGER.warn("Peer {} sent an unknown extended message {}", getPeerIdentity(), messageID);
+                case BITFIELD -> {
+                    int expectedByteCount = (getInfo().getPieceCount() + 7) / 8;
+                    int actualByteCount = message.getPayload().remaining();
+                    if (actualByteCount != expectedByteCount) {
+                        throw new IllegalStateException("Invalid bitfield length, expected " + expectedByteCount + ", actual " + actualByteCount);
+                    }
+                    bitfield.or(BitSet.valueOf(message.getPayload()));
+                    LOGGER.debug("Peer {} updated bitfield, {}%", getPeerIdentity(), bitfield.getPercentageInteger());
+                }
+                case HAVE_ALL -> {
+                    bitfield.setAll();
+                    LOGGER.debug("Peer {} has all pieces", getPeerIdentity());
+                }
+                case HAVE_NONE -> {
+                    bitfield.clearAll();
+                    LOGGER.debug("Peer {} has no pieces", getPeerIdentity());
+                }
+                case EXTENDED -> {
+                    var messageID = message.getPayload().get();
+                    if (messageID == 0) {
+                        var handshakeStream = IO.getInputStream(message.getPayload());
+                        var handshake = BencodeDecoder.decodeFromStream(handshakeStream);
+                        getPeerExtensions().fromHandshake(handshake);
+                        LOGGER.debug("Peer {} received extended handshake: {}", getPeerIdentity(), handshake);
+                    } else {
+                        LOGGER.warn("Peer {} received unknown extended message {}", getPeerIdentity(), messageID);
+                    }
+                }
+                case PIECE -> {
+                    var index = message.getPayload().getInt();
+                    var offset = message.getPayload().getInt();
+                    var data = IO.getArray(message.getPayload());
+
+                    LOGGER.debug("Peer {} received piece {}, offset {}, length {}", getPeerIdentity(), index, offset, data.length);
+
+                    outputFileForTesting.seek(getInfo().getPieceLength() * index + offset);
+                    outputFileForTesting.write(data);
                 }
             }
         }
@@ -173,15 +275,17 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
     public void onConnect(@NotNull Identity identity) {
         swarm.addPeer(this);
 
-        var info = swarm.getInfo(protocol.getInfoHash());
-        if (info == null) {
+        var torrent = swarm.getTorrent(protocol.getInfoHash());
+        if (torrent == null) {
             // TODO
             throw new IllegalStateException("Peers with torrents that are not in the swarm are not supported yet");
         } else {
-            setup(info);
+            setup(torrent);
         }
 
-        if (getPeerExtensions().hasExtensionProtocol()) {
+        if (getPeerExtensions().hasExtensionProtocol() && getClientExtensions().hasExtensionProtocol()) {
+            LOGGER.debug("Peer {} supports extension protocol", getPeerIdentity());
+
             var clientExtensions = getClientExtensions();
 
             var clientTcpPort = identity.getSocketAddress().getPort();
@@ -194,18 +298,46 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
                 clientExtensions.setExtensionYourIP(peerIPAddress.getAddress());
             }
 
-            var bytes = BencodeEncoder.encodeToBytes(clientExtensions.toHandshake());
-            var buffer = ByteBuffer.allocate(1 + bytes.length);
+            var handshake = clientExtensions.toHandshake();
+            var handshakeBytes = BencodeEncoder.encodeToBytes(handshake);
+
+            LOGGER.debug("Peer {} sending extension handshake: {}", getPeerIdentity(), handshake);
+
+            var buffer = ByteBuffer.allocate(1 + handshakeBytes.length);
             buffer.put((byte) 0);
-            buffer.put(bytes);
+            buffer.put(handshakeBytes);
             buffer.flip();
             protocol.send(new MessageImpl(MessageType.EXTENDED, buffer));
         }
+
+        if (getPeerExtensions().hasFastPeers() && getClientExtensions().hasFastPeers()) {
+            LOGGER.debug("Peer {} supports fast peers, sending bitfield", getPeerIdentity());
+            if (torrent.getBitField().isComplete()) {
+                protocol.send(new MessageImpl(MessageType.HAVE_ALL));
+            } else if (torrent.getBitField().isEmpty()) {
+                protocol.send(new MessageImpl(MessageType.HAVE_NONE));
+            } else {
+                protocol.send(new MessageImpl(MessageType.BITFIELD, ByteBuffer.wrap(torrent.getBitField().toArray())));
+            }
+        } else {
+            LOGGER.debug("Peer {} sending bitfield", getPeerIdentity());
+            protocol.send(new MessageImpl(MessageType.BITFIELD, ByteBuffer.wrap(torrent.getBitField().toArray())));
+        }
+
     }
 
     @Override
     public void onClose(@NotNull Throwable throwable) {
         swarm.removePeer(this);
+
+        synchronized (lock) {
+            isReady = false;
+        }
+    }
+
+    @Override
+    public @NotNull String toString() {
+        return "Peer{protocol=" + getProtocol() + ", isReady=" + isReady + "}";
     }
 
 }

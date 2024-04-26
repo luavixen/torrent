@@ -17,7 +17,10 @@ import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.Channels;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Objects;
+import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -110,7 +113,13 @@ public final class Protocol implements AutoCloseable {
                 // Handle keep-alive message
                 if (messageLength == 0) {
                     LOGGER.debug("Peer {} received keep-alive", getIdentity());
-                    buffer.clear();
+                    int remainingOffset = 4;
+                    int remainingLength = buffer.position() - remainingOffset;
+                    if (buffer.position() > 4) {
+                        buffer.put(0, buffer, remainingOffset, remainingLength);
+                        buffer.limit(buffer.capacity());
+                        buffer.position(remainingLength);
+                    }
                     readFromChannel();
                     return;
                 }
