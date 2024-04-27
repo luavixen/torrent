@@ -129,6 +129,10 @@ public final class Hash {
         digest.doFinal(bytes, 0);
     }
 
+    public int length() {
+        return bytes.length;
+    }
+
     public byte @NotNull [] getBytes() {
         return bytes.clone();
     }

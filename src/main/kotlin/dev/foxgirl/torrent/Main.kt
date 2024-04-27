@@ -29,14 +29,21 @@ fun main() {
 
     swarm.addTorrent(metainfo.info)
 
-    val peerAddress = InetSocketAddress(InetAddress.getLocalHost(), 51413)
+    val peerAddress = InetSocketAddress(InetAddress.getByName("127.0.0.1"), 5050)
     val peerChannel = AsynchronousSocketChannel.open()
     val peer = Peer(swarm, peerChannel)
 
     peerChannel.connect(peerAddress)
-    peer.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
+    peer.establishOutgoing(peerAddress, metainfo.infoHash).get()
 
-    Thread.sleep(8000)
+    /*
+    Thread.sleep(2000)
+
+    peer.setChoking(false).get()
+    peer.setInterested(true).get()
+    */
+
+    Thread.sleep(20 * 1000)
 
     peer.close()
     DefaultExecutors.shutdown()

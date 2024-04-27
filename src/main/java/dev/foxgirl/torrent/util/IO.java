@@ -56,7 +56,14 @@ public final class IO {
 
         private int count = 0;
 
-        private AsynchronousByteChannelOperation(AsynchronousByteChannel channel, ByteBuffer buffer, boolean writing, boolean errorOnEOF) {
+        private AsynchronousByteChannelOperation(
+                @NotNull AsynchronousByteChannel channel,
+                @NotNull ByteBuffer buffer,
+                boolean writing,
+                boolean errorOnEOF
+        ) {
+            Objects.requireNonNull(channel, "Argument 'channel'");
+            Objects.requireNonNull(buffer, "Argument 'buffer'");
             this.channel = channel;
             this.buffer = buffer;
             this.writing = writing;

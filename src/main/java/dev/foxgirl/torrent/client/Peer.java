@@ -1,7 +1,6 @@
 package dev.foxgirl.torrent.client;
 
 import dev.foxgirl.torrent.bencode.BencodeDecoder;
-import dev.foxgirl.torrent.bencode.BencodeElement;
 import dev.foxgirl.torrent.bencode.BencodeEncoder;
 import dev.foxgirl.torrent.metainfo.Info;
 import dev.foxgirl.torrent.util.Hash;
@@ -46,17 +45,15 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
     }
 
     public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
-            @NotNull Hash infoHash,
-            @NotNull Identity clientIdentity,
-            @NotNull InetSocketAddress peerAddress
+            @NotNull InetSocketAddress peerAddress,
+            @NotNull Hash infoHash
     ) {
-        return protocol.establishOutgoing(infoHash, clientIdentity, peerAddress);
+        return protocol.establishOutgoing(getClientIdentity(), getClientExtensions(), peerAddress, infoHash);
     }
     public @NotNull CompletableFuture<@NotNull Identity> establishIncoming(
-            @NotNull Identity clientIdentity,
             @NotNull InetSocketAddress peerAddress
     ) {
-        return protocol.establishIncoming(clientIdentity, peerAddress);
+        return protocol.establishIncoming(getClientIdentity(), getClientExtensions(), peerAddress);
     }
 
     public @NotNull Swarm getSwarm() {

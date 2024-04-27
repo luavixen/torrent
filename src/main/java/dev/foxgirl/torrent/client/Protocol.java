@@ -9,12 +9,10 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousByteChannel;
 import java.nio.channels.AsynchronousSocketChannel;
-import java.nio.channels.Channels;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -24,6 +22,7 @@ import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 public final class Protocol implements AutoCloseable {
 
@@ -46,8 +45,6 @@ public final class Protocol implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(Protocol.class);
 
     private static final byte[] PROTOCOL_STRING = "BitTorrent protocol".getBytes(StandardCharsets.ISO_8859_1);
-
-    private static final Extensions SUPPORTED_EXTENSIONS = Extensions.getSupportedExtensions();
 
     private static final long READ_TIMEOUT_MS = 120 * 1000;
     private static final long WRITE_TIMEOUT_MS = 30 * 1000;
@@ -137,10 +134,10 @@ public final class Protocol implements AutoCloseable {
                 int messagePayloadLength = messageLength - 1;
                 int messageTotalLength = messagePayloadLength + 5;
                 if (messageTotalLength < 0) {
-                    throw new IllegalStateException("(Reading) Message payload length is negative or too large: " + messagePayloadLength);
+                    throw new IllegalStateException("(Reading) Message " + messageType + " payload length is negative or too large: " + messagePayloadLength);
                 }
                 if (messageTotalLength > buffer.capacity()) {
-                    throw new IllegalStateException("(Reading) Message total length exceeds buffer capacity: " + messageTotalLength);
+                    throw new IllegalStateException("(Reading) Message " + messageType + " total length exceeds buffer capacity: " + messageTotalLength);
                 }
 
                 if (messageTotalLength > buffer.position()) {
@@ -154,10 +151,8 @@ public final class Protocol implements AutoCloseable {
 
                 try {
                     listener.onReceive(new MessageImpl(messageType, messagePayload, messagePayloadLength));
-                } catch (IllegalStateException | IllegalArgumentException cause) {
-                    throw new IllegalStateException("(Reading) " + cause.getMessage(), cause);
                 } catch (Throwable cause) {
-                    throw new RuntimeException("(Reading) Failed to process message", cause);
+                    throw new RuntimeException("(Reading) Failed to process message " + messageType + " with length " + messagePayloadLength, cause);
                 }
 
                 int remainingOffset = messageTotalLength;
@@ -250,10 +245,10 @@ public final class Protocol implements AutoCloseable {
 
                 var messageLength = pendingMessage.message.getLength();
                 if (messageLength < 0) {
-                    throw new IllegalStateException("(Writing) Message length is negative: " + messageLength);
+                    throw new IllegalStateException("(Writing) Message " + messageType + " length is negative: " + messageLength);
                 }
                 if (messageLength > buffer.capacity() - 5) {
-                    throw new IllegalStateException("(Writing) Message length exceeds buffer capacity: " + messageLength);
+                    throw new IllegalStateException("(Writing) Message " + messageType + " length exceeds buffer capacity: " + messageLength);
                 }
 
                 LOGGER.debug("Peer {} sending message {} with length {}", getIdentity(), messageType, messageLength);
@@ -265,10 +260,8 @@ public final class Protocol implements AutoCloseable {
                 CompletableFuture<Void> future;
                 try {
                     future = pendingMessage.message.writePayloadTo(buffer);
-                } catch (IllegalStateException | IllegalArgumentException cause) {
-                    throw new IllegalStateException("(Writing) " + cause.getMessage(), cause);
                 } catch (Throwable cause) {
-                    throw new RuntimeException("(Writing) Failed to write message", cause);
+                    throw new RuntimeException("(Reading) Failed to write message " + messageType + " with length " + messageLength, cause);
                 }
                 if (future != null) {
                     future = Timeout.timeoutCompletableFuture(OPERATION_TIMEOUT_MS, future);
@@ -454,10 +447,26 @@ public final class Protocol implements AutoCloseable {
             message = cause.getClass().getName();
         }
 
-        LOGGER.info("Peer {} closed: {}", getIdentity(), message);
+        var identity = getIdentity();
+        if (identity == null) {
+            LOGGER.debug("Peer (no identity) closed: {}", message);
+        } else {
+            LOGGER.info("Peer {} closed: {}", identity, message);
+        }
 
-        if (!(cause instanceof IllegalStateException) && !(cause instanceof TimeoutException)) {
-            LOGGER.debug("Peer {} closed with unexpected exception", getIdentity(), cause);
+        var unwrappedException = cause;
+        if (unwrappedException instanceof ExecutionException) {
+            unwrappedException = unwrappedException.getCause();
+        }
+        if (
+            !(unwrappedException instanceof IllegalStateException) &&
+            !(unwrappedException instanceof TimeoutException)
+        ) {
+            if (identity == null) {
+                LOGGER.debug("Peer (no identity) closed with unexpected exception", cause);
+            } else {
+                LOGGER.error("Peer {} closed with unexpected exception", identity, cause);
+            }
         }
 
         // Close read/write handlers
@@ -523,16 +532,19 @@ public final class Protocol implements AutoCloseable {
         private final Timeout timeout = new Timeout(() -> close(new TimeoutException("Handshake timed out")));
 
         private final @NotNull Identity clientIdentity;
+        private final @NotNull Extensions clientExtensions;
         private final @NotNull InetSocketAddress peerAddress;
 
         private @Nullable Hash infoHash;
 
         private Handshake(
                 @NotNull Identity clientIdentity,
+                @NotNull Extensions clientExtensions,
                 @NotNull InetSocketAddress peerAddress,
                 @Nullable Hash infoHash
         ) {
             this.clientIdentity = clientIdentity;
+            this.clientExtensions = clientExtensions;
             this.peerAddress = peerAddress;
             this.infoHash = infoHash;
         }
@@ -562,16 +574,16 @@ public final class Protocol implements AutoCloseable {
                         var peerPstrLen = buffer.get();
                         if (peerPstrLen != PROTOCOL_STRING.length) {
                             throw new IllegalStateException(String.format(
-                                    "Handshake protocol string length mismatch, expected %d, actual %d",
-                                    PROTOCOL_STRING.length, peerPstrLen
+                                "Handshake protocol string length mismatch, expected %d, actual %d",
+                                PROTOCOL_STRING.length, peerPstrLen
                             ));
                         }
                         var peerPstr = IO.getArray(buffer, PROTOCOL_STRING.length);
                         if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
                             throw new IllegalStateException(String.format(
-                                    "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
-                                    new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
-                                    new String(peerPstr, StandardCharsets.ISO_8859_1)
+                                "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
+                                new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
+                                new String(peerPstr, StandardCharsets.ISO_8859_1)
                             ));
                         }
 
@@ -606,7 +618,7 @@ public final class Protocol implements AutoCloseable {
                         buffer.clear();
                         /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
                         /* clientPstr          */ buffer.put(PROTOCOL_STRING);
-                        /* clientReservedBytes */ buffer.put(SUPPORTED_EXTENSIONS.getBits());
+                        /* clientReservedBytes */ buffer.put(clientExtensions.getBits());
                         /* clientInfoHashBytes */ buffer.put(infoHash.getBytes());
                         /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
                         buffer.flip();
@@ -660,40 +672,56 @@ public final class Protocol implements AutoCloseable {
             }
         }
 
-        private CompletableFuture<Identity> establishOutgoing() {
-            return CompletableFuture.completedFuture(null)
-                    .thenCompose(__ -> send())
-                    .thenCompose(__ -> recv())
+        private CompletableFuture<Identity> establish(Supplier<CompletableFuture<PeerHandshake>> peerHandshakeFutureSupplier) {
+            if (isClosed()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Peer closed"));
+            }
+            if (trySetConnectionStateConnecting()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Peer already connected"));
+            }
+            return peerHandshakeFutureSupplier.get()
                     .thenCompose(this::establish)
                     .whenComplete(this::complete);
         }
 
+        private CompletableFuture<Identity> establishOutgoing() {
+            return establish(() -> {
+                return CompletableFuture.completedFuture(null)
+                        .thenCompose(__ -> send())
+                        .thenCompose(__ -> recv());
+            });
+        }
         private CompletableFuture<Identity> establishIncoming() {
-            return CompletableFuture.completedFuture(null)
-                    .thenCompose(__ -> recv())
-                    .thenCompose(peerHandshake -> send().thenApply(__ -> peerHandshake))
-                    .thenCompose(this::establish)
-                    .whenComplete(this::complete);
+            return establish(() -> {
+                return CompletableFuture.completedFuture(null)
+                        .thenCompose(__ -> recv())
+                        .thenCompose(peerHandshake -> send().thenApply(__ -> peerHandshake));
+            });
         }
     }
 
     public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
-            @NotNull Hash infoHash,
             @NotNull Identity clientIdentity,
-            @NotNull InetSocketAddress peerAddress
+            @NotNull Extensions clientExtensions,
+            @NotNull InetSocketAddress peerAddress,
+            @NotNull Hash infoHash
     ) {
-        Objects.requireNonNull(infoHash, "Argument 'infoHash'");
         Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
         Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
-        return new Handshake(clientIdentity, peerAddress, infoHash).establishOutgoing();
+        Objects.requireNonNull(infoHash, "Argument 'infoHash'");
+        if (infoHash.length() != 20) {
+            throw new IllegalArgumentException("Infohash length is not 20 bytes");
+        }
+        return new Handshake(clientIdentity, clientExtensions, peerAddress, infoHash).establishOutgoing();
     }
     public @NotNull CompletableFuture<@NotNull Identity> establishIncoming(
             @NotNull Identity clientIdentity,
+            @NotNull Extensions clientExtensions,
             @NotNull InetSocketAddress peerAddress
     ) {
         Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
         Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
-        return new Handshake(clientIdentity, peerAddress, null).establishIncoming();
+        return new Handshake(clientIdentity, clientExtensions, peerAddress, null).establishIncoming();
     }
 
     public @Nullable Hash getInfoHash() {

@@ -25,7 +25,7 @@ public final class Extensions {
     }
 
     public static @NotNull Extensions getSupportedExtensions() {
-        return new Extensions(SUPPORTED_EXTENSIONS);
+        return SUPPORTED_EXTENSIONS;
     }
 
     private final BitSet bitset = new BitSet(64);
