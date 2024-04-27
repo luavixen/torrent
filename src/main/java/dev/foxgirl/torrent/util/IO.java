@@ -6,12 +6,15 @@ import java.io.*;
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousByteChannel;
 import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.CompletionHandler;
 import java.nio.channels.InterruptedByTimeoutException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.NoSuchFileException;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 
 public final class IO {
@@ -20,6 +23,9 @@ public final class IO {
     }
 
     public static int readN(@NotNull InputStream stream, byte @NotNull [] buffer, int offset, int length) throws IOException {
+        Objects.requireNonNull(stream, "Argument 'stream'");
+        Objects.requireNonNull(buffer, "Argument 'buffer'");
+        Objects.checkFromIndexSize(offset, length, buffer.length);
         int read = 0;
         while (read < length) {
             int count = stream.read(buffer, offset + read, length - read);
@@ -33,7 +39,85 @@ public final class IO {
     }
 
     public static int readAll(@NotNull InputStream stream, byte @NotNull [] buffer, int offset, int length) throws IOException {
-        return readN(stream, buffer, offset, length);
+        int read = readN(stream, buffer, offset, length);
+        if (read < length) {
+            throw new EOFException("Unexpected EOF, expected count " + length + ", actual count " + read);
+        }
+        return read;
+    }
+
+    private static final class AsynchronousByteChannelOperation implements CompletionHandler<Integer, Void> {
+        private final AsynchronousByteChannel channel;
+        private final ByteBuffer buffer;
+        private final boolean writing;
+        private final boolean errorOnEOF;
+
+        private final CompletableFuture<Integer> future = new CompletableFuture<>();
+
+        private int count = 0;
+
+        private AsynchronousByteChannelOperation(AsynchronousByteChannel channel, ByteBuffer buffer, boolean writing, boolean errorOnEOF) {
+            this.channel = channel;
+            this.buffer = buffer;
+            this.writing = writing;
+            this.errorOnEOF = errorOnEOF;
+        }
+
+        private CompletableFuture<Integer> operate() {
+            if (writing) {
+                channel.write(buffer, null, this);
+            } else {
+                channel.read(buffer, null, this);
+            }
+            return future;
+        }
+
+        private void complete() {
+            if (!writing) {
+                buffer.flip();
+            }
+            future.complete(count);
+        }
+        private void completeExceptionally(Throwable cause) {
+            future.completeExceptionally(cause);
+        }
+
+        @Override
+        public void completed(Integer result, Void attachment) {
+            if (result < 0) {
+                if (errorOnEOF) {
+                    completeExceptionally(new EOFException("Unexpected EOF after reading " + count + " bytes"));
+                } else {
+                    complete();
+                }
+            } else {
+                count += result;
+                if (buffer.hasRemaining()) {
+                    operate();
+                } else {
+                    complete();
+                }
+            }
+        }
+
+        @Override
+        public void failed(Throwable cause, Void attachment) {
+            completeExceptionally(cause);
+        }
+    }
+
+    public static @NotNull CompletableFuture<@NotNull Integer> asyncChannelRead(@NotNull AsynchronousByteChannel channel, @NotNull ByteBuffer buffer) {
+        return new AsynchronousByteChannelOperation(channel, buffer, false, false).operate();
+    }
+    public static @NotNull CompletableFuture<@NotNull Integer> asyncChannelReadAll(@NotNull AsynchronousByteChannel channel, @NotNull ByteBuffer buffer) {
+        return new AsynchronousByteChannelOperation(channel, buffer, false, true).operate();
+    }
+
+    public static @NotNull CompletableFuture<Integer> asyncChannelWrite(@NotNull AsynchronousByteChannel channel, @NotNull ByteBuffer buffer) {
+        return new AsynchronousByteChannelOperation(channel, buffer, true, false).operate();
+    }
+    public static @NotNull CompletableFuture<Integer> asyncChannelWriteAll(@NotNull AsynchronousByteChannel channel, @NotNull ByteBuffer buffer) {
+        return new AsynchronousByteChannelOperation(channel, buffer, true, true).operate();
     }
 
     public static byte @NotNull [] readArray(@NotNull InputStream stream, int length) throws IOException {

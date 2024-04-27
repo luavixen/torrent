@@ -35,7 +35,6 @@ fun main() {
 
     peerChannel.connect(peerAddress)
     peer.establishOutgoing(metainfo.infoHash, swarm.identity, peerAddress).get()
-    peer.downloadTest().get()
 
     Thread.sleep(8000)
 

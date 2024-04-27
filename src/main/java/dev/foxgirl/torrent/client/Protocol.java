@@ -59,7 +59,6 @@ public final class Protocol implements AutoCloseable {
 
     // 0 = disconnected, 1 = connecting, 2 = connected
     private final AtomicInteger connectionState = new AtomicInteger();
-
     private final AtomicBoolean isClosed = new AtomicBoolean();
 
     private final Object lock = new Object();
@@ -155,8 +154,8 @@ public final class Protocol implements AutoCloseable {
 
                 try {
                     listener.onReceive(new MessageImpl(messageType, messagePayload, messagePayloadLength));
-                } catch (IllegalStateException cause) {
-                    throw new IllegalStateException("(Reading)" + cause.getMessage(), cause);
+                } catch (IllegalStateException | IllegalArgumentException cause) {
+                    throw new IllegalStateException("(Reading) " + cause.getMessage(), cause);
                 } catch (Throwable cause) {
                     throw new RuntimeException("(Reading) Failed to process message", cause);
                 }
@@ -266,14 +265,17 @@ public final class Protocol implements AutoCloseable {
                 CompletableFuture<Void> future;
                 try {
                     future = pendingMessage.message.writePayloadTo(buffer);
+                } catch (IllegalStateException | IllegalArgumentException cause) {
+                    throw new IllegalStateException("(Writing) " + cause.getMessage(), cause);
                 } catch (Throwable cause) {
-                    throw new RuntimeException("Failed to write message", cause);
+                    throw new RuntimeException("(Writing) Failed to write message", cause);
                 }
                 if (future != null) {
                     future = Timeout.timeoutCompletableFuture(OPERATION_TIMEOUT_MS, future);
                     future.whenCompleteAsync((result, cause) -> {
                         if (cause != null) {
                             pendingMessage.completeExceptionally(cause);
+                            close(cause);
                         } else {
                             buffer.flip();
                             writeToChannel();
@@ -516,51 +518,124 @@ public final class Protocol implements AutoCloseable {
         return writeHandler.send(message);
     }
 
-    private static final class EstablishIncomingHandshake {
-        private final @NotNull Extensions peerExtensions;
-        private final @NotNull Hash peerInfoHash;
-        private final @NotNull Identity peerIdentity;
+    private final class Handshake {
+        private final ByteBuffer buffer = ByteBuffer.allocateDirect(68);
+        private final Timeout timeout = new Timeout(() -> close(new TimeoutException("Handshake timed out")));
 
-        private EstablishIncomingHandshake(
+        private final @NotNull Identity clientIdentity;
+        private final @NotNull InetSocketAddress peerAddress;
+
+        private @Nullable Hash infoHash;
+
+        private Handshake(
+                @NotNull Identity clientIdentity,
+                @NotNull InetSocketAddress peerAddress,
+                @Nullable Hash infoHash
+        ) {
+            this.clientIdentity = clientIdentity;
+            this.peerAddress = peerAddress;
+            this.infoHash = infoHash;
+        }
+
+        private record PeerHandshake(
                 @NotNull Extensions peerExtensions,
                 @NotNull Hash peerInfoHash,
                 @NotNull Identity peerIdentity
-        ) {
-            this.peerExtensions = peerExtensions;
-            this.peerInfoHash = peerInfoHash;
-            this.peerIdentity = peerIdentity;
+        ) {}
+
+        // Receive incoming handshake from peer
+        private CompletableFuture<PeerHandshake> recv() {
+            return CompletableFuture.completedFuture(null)
+                    .thenCompose(__ -> {
+                        assertNotClosed();
+
+                        LOGGER.debug("Peer socket {} connecting, receiving response handshake", peerAddress);
+
+                        buffer.clear();
+
+                        timeout.start(READ_TIMEOUT_MS);
+                        return IO.asyncChannelReadAll(channel, buffer);
+                    })
+                    .thenApply(__ -> {
+                        timeout.cancel();
+
+                        var peerPstrLen = buffer.get();
+                        if (peerPstrLen != PROTOCOL_STRING.length) {
+                            throw new IllegalStateException(String.format(
+                                    "Handshake protocol string length mismatch, expected %d, actual %d",
+                                    PROTOCOL_STRING.length, peerPstrLen
+                            ));
+                        }
+                        var peerPstr = IO.getArray(buffer, PROTOCOL_STRING.length);
+                        if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
+                            throw new IllegalStateException(String.format(
+                                    "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
+                                    new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
+                                    new String(peerPstr, StandardCharsets.ISO_8859_1)
+                            ));
+                        }
+
+                        var peerExtensionsBytes = IO.getArray(buffer, 8);
+                        var peerInfoHashBytes = IO.getArray(buffer, 20);
+                        var peerIdentityBytes = IO.getArray(buffer, 20);
+
+                        var peerExtensions = new Extensions(peerExtensionsBytes);
+                        var peerInfoHash = Hash.of(peerInfoHashBytes);
+                        var peerIdentity = new Identity(peerIdentityBytes, peerAddress);
+
+                        if (infoHash != null) {
+                            if (!Objects.equals(infoHash, peerInfoHash)) {
+                                throw new IllegalStateException("Handshake infohash mismatch, expected " + infoHash + ", actual " + peerInfoHash);
+                            }
+                        } else {
+                            infoHash = peerInfoHash;
+                        }
+
+                        return new PeerHandshake(peerExtensions, peerInfoHash, peerIdentity);
+                    });
         }
-    }
 
-    private interface EstablishCallback {
-        @NotNull EstablishIncomingHandshake establish(@NotNull ByteBuffer buffer, @NotNull Timeout timeout) throws Throwable;
-    }
+        // Send outgoing handshake to peer
+        private CompletableFuture<Void> send() {
+            return CompletableFuture.completedFuture(null)
+                    .thenCompose(__ -> {
+                        assertNotClosed();
 
-    private @NotNull CompletableFuture<@NotNull Identity> establish(@NotNull InetSocketAddress peerAddress, @NotNull EstablishCallback callback) {
-        if (trySetConnectionStateConnecting()) {
-            throw new IllegalStateException("Peer already connected");
+                        LOGGER.debug("Peer socket {} connecting, sending request handshake", peerAddress);
+
+                        buffer.clear();
+                        /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
+                        /* clientPstr          */ buffer.put(PROTOCOL_STRING);
+                        /* clientReservedBytes */ buffer.put(SUPPORTED_EXTENSIONS.getBits());
+                        /* clientInfoHashBytes */ buffer.put(infoHash.getBytes());
+                        /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
+                        buffer.flip();
+
+                        timeout.start(WRITE_TIMEOUT_MS);
+                        return IO.asyncChannelWriteAll(channel, buffer);
+                    })
+                    .thenApply(__ -> {
+                        timeout.cancel();
+
+                        return null;
+                    });
         }
-        return CompletableFuture.supplyAsync(() -> {
-            assertNotClosed();
 
-            var buffer = ByteBuffer.allocate(68);
-            var timeout = new Timeout(() -> close(new TimeoutException("Handshake timed out")));
+        // Set up state and "establish" connection with peer
+        private CompletableFuture<Identity> establish(PeerHandshake peerHandshake) {
+            return CompletableFuture.supplyAsync(() -> {
+                assertNotClosed();
 
-            try {
-                var peerHandshake = callback.establish(buffer, timeout);
-
-                var readHandler = new ReadHandler();
-                var writeHandler = new WriteHandler();
+                var readHandler = new Protocol.ReadHandler();
+                var writeHandler = new Protocol.WriteHandler();
 
                 synchronized (lock) {
-                    this.infoHash = peerHandshake.peerInfoHash;
-                    this.identity = peerHandshake.peerIdentity;
-                    this.extensions = peerHandshake.peerExtensions;
-                    this.readHandler = readHandler;
-                    this.writeHandler = writeHandler;
+                    Protocol.this.infoHash = peerHandshake.peerInfoHash;
+                    Protocol.this.identity = peerHandshake.peerIdentity;
+                    Protocol.this.extensions = peerHandshake.peerExtensions;
+                    Protocol.this.readHandler = readHandler;
+                    Protocol.this.writeHandler = writeHandler;
                 }
-
-                assertNotClosed();
 
                 readHandler.readFromChannel();
                 writeHandler.sendKeepAliveOnIntervalAfterDelay();
@@ -573,90 +648,33 @@ public final class Protocol implements AutoCloseable {
                 listener.onConnect(peerHandshake.peerIdentity);
 
                 return peerHandshake.peerIdentity;
-            } catch (Throwable cause) {
+            }, DefaultExecutors.getDefaultExecutor());
+        }
+
+        // Clean up on completion
+        private void complete(Object ignored, Throwable cause) {
+            timeout.cancel();
+            if (cause != null) {
                 LOGGER.info("Peer socket {} connection failed", peerAddress, cause);
                 close(cause);
-                throw cause instanceof RuntimeException ? (RuntimeException) cause : new CompletionException(cause);
-            } finally {
-                timeout.cancel();
             }
-        }, DefaultExecutors.getIOExecutor());
-    }
-
-    private EstablishIncomingHandshake establishReadIncomingHandshake(
-            @NotNull InetSocketAddress peerAddress,
-            @NotNull ByteBuffer buffer,
-            @NotNull Timeout timeout,
-            @Nullable Hash infoHash
-    ) throws IOException {
-        // Read incoming handshake
-
-        assertNotClosed();
-
-        LOGGER.debug("Peer socket {} connecting, receiving response handshake", peerAddress);
-
-        timeout.start(READ_TIMEOUT_MS);
-        IO.readAll(Channels.newInputStream(channel), buffer.array(), 0, 68);
-        timeout.cancel();
-
-        var peerPstrLen = buffer.get();
-        if (peerPstrLen != PROTOCOL_STRING.length) {
-            throw new IllegalStateException(String.format(
-                "Handshake protocol string length mismatch, expected %d, actual %d",
-                PROTOCOL_STRING.length, peerPstrLen
-            ));
-        }
-        var peerPstr = IO.getArray(buffer, PROTOCOL_STRING.length);
-        if (!Arrays.equals(peerPstr, PROTOCOL_STRING)) {
-            throw new IllegalStateException(String.format(
-                "Handshake protocol string mismatch, expected \"%s\", actual \"%s\"",
-                new String(PROTOCOL_STRING, StandardCharsets.ISO_8859_1),
-                new String(peerPstr, StandardCharsets.ISO_8859_1)
-            ));
         }
 
-        var peerReservedBytes = IO.getArray(buffer, 8);
-        var peerInfoHashBytes = IO.getArray(buffer, 20);
-        var peerIdentityBytes = IO.getArray(buffer, 20);
-
-        // Process incoming handshake and setup protocol
-
-        var peerExtensions = new Extensions(peerReservedBytes);
-        var peerInfoHash = Hash.of(peerInfoHashBytes);
-        var peerIdentity = new Identity(peerIdentityBytes, peerAddress);
-
-        if (infoHash != null && !Objects.equals(infoHash, peerInfoHash)) {
-            throw new IllegalStateException("Handshake infohash mismatch, expected " + infoHash + ", actual " + peerInfoHash);
+        private CompletableFuture<Identity> establishOutgoing() {
+            return CompletableFuture.completedFuture(null)
+                    .thenCompose(__ -> send())
+                    .thenCompose(__ -> recv())
+                    .thenCompose(this::establish)
+                    .whenComplete(this::complete);
         }
 
-        return new EstablishIncomingHandshake(peerExtensions, peerInfoHash, peerIdentity);
-    }
-
-    private void establishWriteOutgoingHandshake(
-            @NotNull InetSocketAddress peerAddress,
-            @NotNull ByteBuffer buffer,
-            @NotNull Timeout timeout,
-            @NotNull Hash infoHash,
-            @NotNull Identity clientIdentity
-    ) throws IOException {
-        // Write outgoing handshake
-
-        assertNotClosed();
-
-        LOGGER.debug("Peer socket {} connecting, sending request handshake", peerAddress);
-
-        /* clientPstrLen       */ buffer.put((byte) PROTOCOL_STRING.length);
-        /* clientPstr          */ buffer.put(PROTOCOL_STRING);
-        /* clientReservedBytes */ buffer.put(SUPPORTED_EXTENSIONS.getBits());
-        /* clientInfoHashBytes */ buffer.put(infoHash.getBytes());
-        /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
-        buffer.flip();
-
-        timeout.start(WRITE_TIMEOUT_MS);
-        Channels.newOutputStream(channel).write(buffer.array(), 0, buffer.limit());
-        timeout.cancel();
-
-        buffer.clear();
+        private CompletableFuture<Identity> establishIncoming() {
+            return CompletableFuture.completedFuture(null)
+                    .thenCompose(__ -> recv())
+                    .thenCompose(peerHandshake -> send().thenApply(__ -> peerHandshake))
+                    .thenCompose(this::establish)
+                    .whenComplete(this::complete);
+        }
     }
 
     public @NotNull CompletableFuture<@NotNull Identity> establishOutgoing(
@@ -667,10 +685,7 @@ public final class Protocol implements AutoCloseable {
         Objects.requireNonNull(infoHash, "Argument 'infoHash'");
         Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
         Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
-        return establish(peerAddress, (buffer, timeout) -> {
-            establishWriteOutgoingHandshake(peerAddress, buffer, timeout, infoHash, clientIdentity);
-            return establishReadIncomingHandshake(peerAddress, buffer, timeout, infoHash);
-        });
+        return new Handshake(clientIdentity, peerAddress, infoHash).establishOutgoing();
     }
     public @NotNull CompletableFuture<@NotNull Identity> establishIncoming(
             @NotNull Identity clientIdentity,
@@ -678,11 +693,7 @@ public final class Protocol implements AutoCloseable {
     ) {
         Objects.requireNonNull(clientIdentity, "Argument 'clientIdentity'");
         Objects.requireNonNull(peerAddress, "Argument 'peerAddress'");
-        return establish(peerAddress, (buffer, timeout) -> {
-            var peerHandshake = establishReadIncomingHandshake(peerAddress, buffer, timeout, infoHash);
-            establishWriteOutgoingHandshake(peerAddress, buffer, timeout, peerHandshake.peerInfoHash, clientIdentity);
-            return peerHandshake;
-        });
+        return new Handshake(clientIdentity, peerAddress, null).establishIncoming();
     }
 
     public @Nullable Hash getInfoHash() {

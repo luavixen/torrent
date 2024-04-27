@@ -43,11 +43,10 @@ public final class BencodeString implements BencodePrimitive, Comparable<Bencode
     }
 
     private final byte[] bytes;
-    private final int hash;
+    private volatile int hash;
 
     private BencodeString(byte[] bytes) {
         this.bytes = bytes;
-        this.hash = hash(bytes);
     }
 
     private static int hash(byte[] value) {
@@ -56,7 +55,7 @@ public final class BencodeString implements BencodePrimitive, Comparable<Bencode
             hash ^= b;
             hash *= 16777619;
         }
-        return hash;
+        return hash != 0 ? hash : 31;
     }
 
     public @NotNull String getValue() {
@@ -156,6 +155,10 @@ public final class BencodeString implements BencodePrimitive, Comparable<Bencode
 
     @Override
     public int hashCode() {
+        var hash = this.hash;
+        if (hash == 0) {
+            hash = this.hash = hash(bytes);
+        }
         return hash;
     }
 
@@ -164,7 +167,8 @@ public final class BencodeString implements BencodePrimitive, Comparable<Bencode
         if (obj == this) return true;
         if (obj == null || obj.getClass() != getClass()) return false;
         var that = (BencodeString) obj;
-        return hash == that.hash && Arrays.equals(bytes, that.bytes);
+        if (hash != 0 && that.hash != 0 && hash != that.hash) return false;
+        return Arrays.equals(bytes, that.bytes);
     }
 
     @Override

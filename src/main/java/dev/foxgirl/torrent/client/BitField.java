@@ -7,8 +7,6 @@ import java.util.BitSet;
 
 public final class BitField {
 
-    private final Object lock = new Object();
-
     private final @NotNull Info info;
     private final @NotNull BitSet bitset;
 
@@ -21,35 +19,31 @@ public final class BitField {
         return info;
     }
 
-    public @NotNull BitSet getBitSet() {
-        synchronized (lock) {
-            return (BitSet) bitset.clone();
-        }
+    public synchronized @NotNull BitSet getBitSet() {
+        return (BitSet) bitset.clone();
     }
 
-    public byte @NotNull [] toArray() {
-        synchronized (lock) {
-            var bytes = new byte[(info.getPieceCount() + 7) / 8];
-            for (int i = 0, length = bytes.length; i < length; i++) {
-                for (int j = 0; j < 8; j++) {
-                    if (bitset.get(i * 8 + j)) {
-                        bytes[i] |= (byte) (1 << j);
-                    }
+    public int byteLength() {
+        return (info.getPieceCount() + 7) / 8;
+    }
+
+    public synchronized byte @NotNull [] toArray() {
+        var bytes = new byte[byteLength()];
+        for (int i = 0, length = bytes.length; i < length; i++) {
+            for (int j = 0; j < 8; j++) {
+                if (bitset.get(i * 8 + j)) {
+                    bytes[i] |= (byte) (1 << j);
                 }
             }
-            return bytes;
         }
+        return bytes;
     }
 
-    public boolean get(int index) {
-        synchronized (lock) {
-            return bitset.get(index);
-        }
+    public synchronized boolean get(int index) {
+        return bitset.get(index);
     }
-    public void set(int index, boolean value) {
-        synchronized (lock) {
-            bitset.set(index, value);
-        }
+    public synchronized void set(int index, boolean value) {
+        bitset.set(index, value);
     }
     public void set(int index) {
         set(index, true);
@@ -58,58 +52,43 @@ public final class BitField {
         set(index, false);
     }
 
-    public void setAll() {
-        synchronized (lock) {
-            bitset.set(0, info.getPieceCount());
-        }
+    public synchronized void setAll() {
+        bitset.set(0, info.getPieceCount());
     }
-    public void clearAll() {
-        synchronized (lock) {
-            bitset.clear();
-        }
+    public synchronized void clearAll() {
+        bitset.clear();
     }
 
-    public void and(@NotNull BitSet other) {
-        synchronized (lock) {
-            bitset.and(other);
-        }
+    public synchronized void and(@NotNull BitSet other) {
+        bitset.and(other);
     }
+    public synchronized void or(@NotNull BitSet other) {
+        bitset.or(other);
+    }
+
     public void and(@NotNull BitField other) {
-        synchronized (other.lock) {
+        synchronized (other) {
             and(other.bitset);
         }
     }
-    public void or(@NotNull BitSet other) {
-        synchronized (lock) {
-            bitset.or(other);
-        }
-    }
     public void or(@NotNull BitField other) {
-        synchronized (other.lock) {
+        synchronized (other) {
             or(other.bitset);
         }
     }
 
-    public boolean isComplete() {
-        synchronized (lock) {
-            return bitset.cardinality() == info.getPieceCount();
-        }
+    public synchronized boolean isComplete() {
+        return bitset.cardinality() == info.getPieceCount();
     }
-    public boolean isEmpty() {
-        synchronized (lock) {
-            return bitset.isEmpty();
-        }
+    public synchronized boolean isEmpty() {
+        return bitset.isEmpty();
     }
 
-    public float getPercentage() {
-        synchronized (lock) {
-            return (float) bitset.cardinality() * 100.0F / (float) info.getPieceCount();
-        }
+    public synchronized float getPercentage() {
+        return (float) bitset.cardinality() * 100.0F / (float) info.getPieceCount();
     }
     public int getPercentageInteger() {
-        synchronized (lock) {
-            return Math.round(getPercentage());
-        }
+        return Math.round(getPercentage());
     }
 
     @Override
