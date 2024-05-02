@@ -286,7 +286,7 @@ public final class MetaInfo extends InfoContainer {
         return info;
     }
     public @NotNull Hash getInfoHash() {
-        return info.getHash();
+        return info.getInfoHash();
     }
 
     public @Nullable String getAnnounce() {

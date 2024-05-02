@@ -27,7 +27,7 @@ public abstract class InfoContainer {
         return extraFields.copy();
     }
 
-    private @Nullable BencodeElement copyIfMutable(@Nullable BencodeElement element) {
+    private static @Nullable BencodeElement copyIfMutable(@Nullable BencodeElement element) {
         if (element == null) return null;
         return element instanceof BencodePrimitive ? element : element.copy();
     }

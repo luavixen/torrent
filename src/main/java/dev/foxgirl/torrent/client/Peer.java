@@ -20,14 +20,14 @@ import java.util.concurrent.CompletableFuture;
 
 public final class Peer implements Protocol.Listener, AutoCloseable {
 
-    private final @NotNull Swarm swarm;
+    private final @NotNull Client client;
     private final @NotNull Protocol protocol;
 
     private final Object lock = new Object();
 
     private boolean isReady = false;
 
-    private Info info;
+    private Swarm swarm;
 
     private BitField clientBitfield;
     private BitField peerBitfield;
@@ -37,10 +37,10 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
     private boolean isPeerChoking = true;
     private boolean isPeerInterested = false;
 
-    public Peer(@NotNull Swarm swarm, @NotNull AsynchronousByteChannel channel) {
-        Objects.requireNonNull(swarm, "Argument 'swarm'");
+    public Peer(@NotNull Client client, @NotNull AsynchronousByteChannel channel) {
+        Objects.requireNonNull(client, "Argument 'client'");
         Objects.requireNonNull(channel, "Argument 'channel'");
-        this.swarm = swarm;
+        this.client = client;
         this.protocol = new Protocol(channel, this);
     }
 
@@ -56,15 +56,15 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
         return protocol.establishIncoming(getClientIdentity(), getClientExtensions(), peerAddress);
     }
 
-    public @NotNull Swarm getSwarm() {
-        return swarm;
+    public @NotNull Client getClient() {
+        return client;
     }
     public @NotNull Protocol getProtocol() {
         return protocol;
     }
 
     public @NotNull Identity getClientIdentity() {
-        return swarm.getIdentity();
+        return client.getIdentity();
     }
     public @NotNull Identity getPeerIdentity() {
         var identity = protocol.getIdentity();
@@ -74,10 +74,10 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
         return identity;
     }
 
-    public /* immutable */ @NotNull Extensions getClientExtensions() {
-        return swarm.getExtensions();
+    public @NotNull Extensions getClientExtensions() {
+        return client.getExtensions();
     }
-    public /* mutable */ @NotNull Extensions getPeerExtensions() {
+    public @NotNull Extensions getPeerExtensions() {
         var extensions = protocol.getExtensions();
         if (extensions == null) {
             throw new IllegalStateException("Peer is not connected");
@@ -91,18 +91,55 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
         }
     }
 
+    private void assertReady() {
+        if (!isReady()) {
+            throw new IllegalStateException("Peer is not ready");
+        }
+    }
+
+    public @NotNull Swarm getSwarm() {
+        synchronized (lock) {
+            assertReady();
+            return Objects.requireNonNull(swarm, "Field 'swarm'");
+        }
+    }
+
+    public @NotNull Info getInfo() {
+        return getSwarm().getInfo();
+    }
+
+    public @NotNull BitField getClientBitfield() {
+        synchronized (lock) {
+            assertReady();
+            return Objects.requireNonNull(clientBitfield, "Field 'clientBitfield'");
+        }
+    }
+    public @NotNull BitField getPeerBitfield() {
+        synchronized (lock) {
+            assertReady();
+            return Objects.requireNonNull(peerBitfield, "Field 'peerBitfield'");
+        }
+    }
+
+    public boolean isClientChoking() {
+        synchronized (lock) { assertReady(); return isClientChoking; }
+    }
+    public boolean isClientInterested() {
+        synchronized (lock) { assertReady(); return isClientInterested; }
+    }
+    public boolean isPeerChoking() {
+        synchronized (lock) { assertReady(); return isPeerChoking; }
+    }
+    public boolean isPeerInterested() {
+        synchronized (lock) { assertReady(); return isPeerInterested; }
+    }
+
     @Override
     public void close() {
         protocol.close();
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Protocol.class);
-
-    private void assertReady() {
-        if (!isReady()) {
-            throw new IllegalStateException("Peer is not ready");
-        }
-    }
 
     private boolean supportsFastPeers() {
         return getPeerExtensions().hasFastPeers() && getClientExtensions().hasFastPeers();
@@ -122,14 +159,15 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
         }
     }
 
-    private void setup(BitField clientBitfield) {
+    private void setup(@NotNull Swarm swarm) {
         synchronized (lock) {
             isReady = true;
-            info = clientBitfield.getInfo();
-            this.clientBitfield = clientBitfield;
-            this.peerBitfield = new BitField(clientBitfield.getInfo());
+            this.swarm = swarm;
+            this.clientBitfield = swarm.getBitField();
+            this.peerBitfield = new BitField(swarm.getInfo());
         }
-        LOGGER.info("Peer {} ready with infohash {}", getPeerIdentity(), clientBitfield.getInfo().getHash());
+        swarm.addPeer(this);
+        LOGGER.info("Peer {} ready with infohash {}", getPeerIdentity(), swarm.getInfoHash());
     }
 
     private @NotNull CompletableFuture<Void> setChoking(boolean isChoking) {
@@ -178,8 +216,8 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
                 case HAVE -> {
                     assertReady();
                     int pieceIndex = message.getPayload().getInt();
-                    if (pieceIndex < 0 || pieceIndex >= info.getPieceCount()) {
-                        throw new IllegalStateException("Invalid piece index, expected [0, " + info.getPieceCount() + "), actual " + pieceIndex);
+                    if (pieceIndex < 0 || pieceIndex >= getInfo().getPieceCount()) {
+                        throw new IllegalStateException("Invalid piece index, expected [0, " + getInfo().getPieceCount() + "), actual " + pieceIndex);
                     }
                     peerBitfield.set(pieceIndex);
                     LOGGER.debug("Peer {} has piece {}, {}%", getPeerIdentity(), pieceIndex, peerBitfield.getPercentageInteger());
@@ -195,12 +233,12 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
                     LOGGER.debug("Peer {} updated bitfield, {}%", getPeerIdentity(), peerBitfield.getPercentageInteger());
                 }
                 case HAVE_ALL -> {
-                    assertReady();
+                    assertReady(); assertFastPeers();
                     peerBitfield.setAll();
                     LOGGER.debug("Peer {} has all pieces", getPeerIdentity());
                 }
                 case HAVE_NONE -> {
-                    assertReady();
+                    assertReady(); assertFastPeers();
                     peerBitfield.clearAll();
                     LOGGER.debug("Peer {} has no pieces", getPeerIdentity());
                 }
@@ -221,14 +259,12 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
 
     @Override
     public void onConnect(@NotNull Identity identity) {
-        swarm.addPeer(this);
-
-        var clientBitfield = swarm.getTorrent(protocol.getInfoHash());
-        if (clientBitfield == null) {
+        var swarm = client.getSwarm(protocol.getInfoHash());
+        if (swarm == null) {
             // TODO
             throw new IllegalStateException("Peers with torrents that are not in the swarm are not supported yet");
         } else {
-            setup(clientBitfield);
+            setup(swarm);
         }
 
         if (supportsExtensionProtocol()) {
@@ -277,10 +313,14 @@ public final class Peer implements Protocol.Listener, AutoCloseable {
 
     @Override
     public void onClose(@NotNull Throwable throwable) {
+        Swarm swarm;
         synchronized (lock) {
             isReady = false;
+            swarm = this.swarm;
         }
-        swarm.removePeer(this);
+        if (swarm != null) {
+            swarm.removePeer(this);
+        }
     }
 
     @Override

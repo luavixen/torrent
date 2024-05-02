@@ -528,7 +528,7 @@ public final class Protocol implements AutoCloseable {
     }
 
     private final class Handshake {
-        private final ByteBuffer buffer = ByteBuffer.allocateDirect(68);
+        private final ByteBuffer buffer = ByteBuffer.allocate(68);
         private final Timeout timeout = new Timeout(() -> close(new TimeoutException("Handshake timed out")));
 
         private final @NotNull Identity clientIdentity;

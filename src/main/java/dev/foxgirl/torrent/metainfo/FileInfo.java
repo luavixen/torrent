@@ -6,10 +6,7 @@ import dev.foxgirl.torrent.bencode.BencodeMap;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.StringJoiner;
+import java.util.*;
 
 public final class FileInfo extends InfoContainer {
 
@@ -55,7 +52,47 @@ public final class FileInfo extends InfoContainer {
         return new FileInfo(path, length, map);
     }
 
-    private final @NotNull List<@NotNull String> path;
+    private static final class Path extends AbstractList<String> {
+        private final String[] elements;
+        private final int hash;
+
+        private Path(List<String> path) {
+            this.elements = new String[path.size()]; path.toArray(elements);
+            this.hash = Arrays.hashCode(elements);
+            for (var element : elements) {
+                if (element == null) {
+                    throw new IllegalArgumentException("Path element is null");
+                }
+            }
+        }
+
+        @Override
+        public String get(int index) {
+            return elements[index];
+        }
+
+        @Override
+        public int size() {
+            return elements.length;
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == this) return true;
+            if (obj == null) return false;
+            if (obj instanceof Path that) {
+                return hash == that.hash && Arrays.equals(elements, that.elements);
+            }
+            return super.equals(obj);
+        }
+    }
+
+    private final Path path;
     private final long length;
 
     public FileInfo(@NotNull List<@NotNull String> path, long length, @Nullable BencodeMap extraFields) {
@@ -63,7 +100,6 @@ public final class FileInfo extends InfoContainer {
 
         Objects.requireNonNull(path, "Argument 'path'");
 
-        path = List.copyOf(path);
         if (path.isEmpty()) {
             throw new IllegalArgumentException("Path is empty");
         }
@@ -72,12 +108,16 @@ public final class FileInfo extends InfoContainer {
             throw new IllegalArgumentException("Length is negative");
         }
 
-        this.path = path;
+        this.path = new Path(path);
         this.length = length;
     }
 
     public @NotNull List<@NotNull String> getPath() {
         return path;
+    }
+
+    public @NotNull String getPathString() {
+        return String.join("/", path);
     }
 
     public long getLength() {

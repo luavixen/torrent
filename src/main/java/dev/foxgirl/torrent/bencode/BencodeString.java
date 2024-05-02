@@ -8,12 +8,21 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.WeakHashMap;
 
 public final class BencodeString implements BencodePrimitive, Comparable<BencodeString> {
 
+    private static final WeakHashMap<String, BencodeString> CACHE = new WeakHashMap<>();
+
     public static @NotNull BencodeString of(@NotNull String value) {
         Objects.requireNonNull(value, "Argument 'value'");
-        return new BencodeString(value.getBytes(StandardCharsets.UTF_8));
+        synchronized (CACHE) {
+            var string = CACHE.get(value);
+            if (string == null) {
+                CACHE.put(value, string = new BencodeString(value.getBytes(StandardCharsets.UTF_8)));
+            }
+            return string;
+        }
     }
 
     public static @NotNull BencodeString of(byte @NotNull [] value) {

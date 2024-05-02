@@ -93,7 +93,7 @@ public final class BitField {
 
     @Override
     public @NotNull String toString() {
-        return "BitField{infoHash=" + info.getHash() + ", percentage=" + getPercentageInteger() + "%}";
+        return "BitField{infoHash=" + info.getInfoHash() + ", percentage=" + getPercentageInteger() + "%}";
     }
 
 }

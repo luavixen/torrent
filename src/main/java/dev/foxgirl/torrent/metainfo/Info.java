@@ -8,10 +8,7 @@ import org.jetbrains.annotations.Nullable;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.StringJoiner;
+import java.util.*;
 
 public final class Info extends InfoContainer {
 
@@ -126,7 +123,21 @@ public final class Info extends InfoContainer {
     private final @NotNull List<@NotNull FileInfo> files;
     private final boolean isSingleFile;
     private final @Nullable Boolean isPrivate;
-    private final @NotNull Hash hash;
+
+    private final @NotNull Hash infoHash;
+    private final long infoLength;
+
+    private static final class FileEntry {
+        private final FileInfo file;
+        private final long offset;
+
+        private FileEntry(FileInfo file, long offset) {
+            this.file = file;
+            this.offset = offset;
+        }
+    }
+
+    private final Map<List<String>, FileEntry> fileEntries;
 
     public Info(
             @NotNull String fileName,
@@ -161,7 +172,11 @@ public final class Info extends InfoContainer {
         this.isSingleFile = true;
         this.isPrivate = isPrivate;
 
-        this.hash = calculateInfoHash(toBencode());
+        var digestOutputStream = calculateInfoHashStream(toBencode());
+        this.infoHash = digestOutputStream.complete();
+        this.infoLength = digestOutputStream.getCount();
+
+        this.fileEntries = createFileEntries();
 
         checkPiecesLength();
     }
@@ -202,7 +217,11 @@ public final class Info extends InfoContainer {
         this.isSingleFile = false;
         this.isPrivate = isPrivate;
 
-        this.hash = calculateInfoHash(toBencode());
+        var digestOutputStream = calculateInfoHashStream(toBencode());
+        this.infoHash = digestOutputStream.complete();
+        this.infoLength = digestOutputStream.getCount();
+
+        this.fileEntries = createFileEntries();
 
         checkPiecesLength();
     }
@@ -233,20 +252,41 @@ public final class Info extends InfoContainer {
         checkInfoHash(infoHash);
     }
 
-    private static Hash calculateInfoHash(BencodeElement element) {
+    private static Hash.DigestOutputStream calculateInfoHashStream(BencodeElement element) {
         try (var digestOutputStream = Hash.digestOutputStream(Hash.Algorithm.SHA1)) {
-            try (var bufferedOutputStream = new BufferedOutputStream(digestOutputStream, 4096)) {
+            try (var bufferedOutputStream = new BufferedOutputStream(digestOutputStream, 2048)) {
                 BencodeEncoder.encodeToStream(element, bufferedOutputStream);
             }
-            return digestOutputStream.complete();
+            return digestOutputStream;
         } catch (IOException cause) {
             throw new RuntimeException("Failed to calculate infohash from Bencode", cause);
         }
     }
 
+    private static Hash calculateInfoHash(BencodeElement element) {
+        return calculateInfoHashStream(element).complete();
+    }
+
+    private Map<List<String>, FileEntry> createFileEntries() {
+        if (files.size() == 1) {
+            var file = files.get(0);
+            return Map.of(file.getPath(), new FileEntry(file, 0));
+        }
+        var entries = new HashMap<List<String>, FileEntry>((files.size() >> 2) + (files.size() >> 1));
+        var offset = 0L;
+        for (var file : files) {
+            var previousEntry = entries.putIfAbsent(file.getPath(), new FileEntry(file, offset));
+            if (previousEntry != null) {
+                throw new IllegalArgumentException("Duplicate file path: " + file.getPathString());
+            }
+            offset += file.getLength();
+        }
+        return entries;
+    }
+
     private void checkInfoHash(Hash infoHash) {
         Objects.requireNonNull(infoHash, "Argument 'infoHash'");
-        if (!infoHash.equals(this.hash)) {
+        if (!Objects.equals(this.infoHash, infoHash)) {
             throw new IllegalStateException("Provided info hash does not match calculated hash");
         }
     }
@@ -319,8 +359,45 @@ public final class Info extends InfoContainer {
         return isPrivate;
     }
 
-    public @NotNull Hash getHash() {
-        return hash;
+    public @NotNull Hash getInfoHash() {
+        return infoHash;
+    }
+
+    public long getInfoLength() {
+        return infoLength;
+    }
+
+    public int getPieceIndex(long offset) {
+        if (offset < 0 || offset >= totalLength) {
+            throw new IndexOutOfBoundsException("Offset is out of bounds");
+        }
+        var pieceIndex = (int) (offset / pieceLength);
+        if (pieceIndex < 0 || pieceIndex >= pieces.size()) {
+            throw new IllegalStateException("Calculated piece index is invalid");
+        }
+        return pieceIndex;
+    }
+
+    public long getPieceLength(int pieceIndex) {
+        if (pieceIndex < 0 || pieceIndex >= pieces.size()) {
+            throw new IndexOutOfBoundsException("Piece index is out of bounds");
+        }
+        return pieceIndex == pieces.size() - 1
+                ? totalLength % pieceLength
+                : pieceLength;
+    }
+
+    public long getFileOffset(@NotNull FileInfo file) {
+        Objects.requireNonNull(file, "Argument 'file'");
+        return getFileOffset(file.getPath());
+    }
+    public long getFileOffset(@NotNull List<String> path) {
+        Objects.requireNonNull(path, "Argument 'path'");
+        var fileEntry = fileEntries.get(path);
+        if (fileEntry == null) {
+            throw new IllegalArgumentException("File not found in info");
+        }
+        return fileEntry.offset;
     }
 
     @Override
@@ -332,7 +409,8 @@ public final class Info extends InfoContainer {
                 .add("totalLength=" + totalLength)
                 .add("files=" + files)
                 .add("isSingleFile=" + isSingleFile)
-                .add("hash=" + hash)
+                .add("infoHash=" + infoHash)
+                .add("infoLength=" + infoLength)
                 .toString();
     }
 

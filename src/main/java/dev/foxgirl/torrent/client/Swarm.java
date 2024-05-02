@@ -3,68 +3,85 @@ package dev.foxgirl.torrent.client;
 import dev.foxgirl.torrent.metainfo.Info;
 import dev.foxgirl.torrent.util.Hash;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-public final class Swarm {
+public final class Swarm implements AutoCloseable {
 
-    private final @NotNull Identity identity;
-    private final @NotNull Extensions extensions;
+    private final @NotNull Client client;
+    private final @NotNull BitField bitfield;
 
-    private final Object lock = new Object();
+    private final AtomicBoolean isClosed = new AtomicBoolean();
+    private final Set<Peer> peers = new LinkedHashSet<>(32);
 
-    private final Set<Peer> peers = new LinkedHashSet<>(200);
-    private final Map<Hash, BitField> torrents = new LinkedHashMap<>(32);
-
-    public Swarm(@NotNull Identity identity) {
-        Objects.requireNonNull(identity, "Argument 'identity'");
-        this.identity = identity;
-        this.extensions = Extensions.getSupportedExtensions();
-    }
-
-    public @NotNull Identity getIdentity() {
-        return identity;
-    }
-    public @NotNull Extensions getExtensions() {
-        return extensions.copyImmutable();
-    }
-
-    public @Nullable BitField getTorrent(@Nullable Hash infoHash) {
-        if (infoHash == null) {
-            return null;
-        }
-        synchronized (lock) {
-            return torrents.get(infoHash);
-        }
-    }
-
-    public @NotNull BitField addTorrent(@NotNull Info info) {
+    public Swarm(@NotNull Client client, @NotNull Info info) {
+        Objects.requireNonNull(client, "Argument 'client'");
         Objects.requireNonNull(info, "Argument 'info'");
-        synchronized (lock) {
-            return torrents.computeIfAbsent(info.getHash(), (hash) -> new BitField(info));
+        this.client = client;
+        this.bitfield = new BitField(info);
+        if (!client.addSwarm(this)) {
+            throw new IllegalStateException("Swarm already exists");
         }
     }
 
-    public boolean addPeer(@NotNull Peer peer) {
-        Objects.requireNonNull(peer, "Argument 'peer'");
-        synchronized (lock) {
-            return peers.add(peer);
+    public @NotNull Client getClient() {
+        return client;
+    }
+    public @NotNull BitField getBitField() {
+        return bitfield;
+    }
+
+    public @NotNull Info getInfo() {
+        return bitfield.getInfo();
+    }
+    public @NotNull Hash getInfoHash() {
+        return getInfo().getInfoHash();
+    }
+
+    public boolean isClosed() {
+        return isClosed.get();
+    }
+
+    private void assertNotClosed() {
+        if (isClosed()) {
+            throw new IllegalStateException("Swarm is closed");
         }
     }
-    public boolean removePeer(@NotNull Peer peer) {
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public @NotNull List<@NotNull Peer> getPeers() {
+        return (List) Arrays.asList(peers.toArray());
+    }
+
+    public synchronized void addPeer(@NotNull Peer peer) {
         Objects.requireNonNull(peer, "Argument 'peer'");
-        synchronized (lock) {
-            return peers.remove(peer);
+        assertNotClosed();
+        peers.add(peer);
+    }
+
+    public synchronized void removePeer(@NotNull Peer peer) {
+        Objects.requireNonNull(peer, "Argument 'peer'");
+        if (!isClosed()) {
+            peers.remove(peer);
         }
     }
 
     @Override
+    public synchronized void close() {
+        if (isClosed.getAndSet(true)) {
+            return;
+        }
+        for (var peer : getPeers()) {
+            peer.close();
+        }
+        peers.clear();
+        client.removeSwarm(this);
+    }
+
+    @Override
     public @NotNull String toString() {
-        return String.format(
-            "Swarm{identity=%s, peers=%d, torrents=%d}",
-            identity, peers.size(), torrents.size()
-        );
+        return "Swarm{infoHash=" + getInfoHash() + ", peers=" + peers.size() + ", isClosed=" + isClosed() + "}";
     }
 
 }

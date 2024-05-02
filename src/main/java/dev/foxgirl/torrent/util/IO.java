@@ -93,7 +93,7 @@ public final class IO {
         public void completed(Integer result, Void attachment) {
             if (result < 0) {
                 if (errorOnEOF) {
-                    completeExceptionally(new EOFException("Unexpected EOF after reading " + count + " bytes"));
+                    completeExceptionally(new EOFException("Unexpected EOF after " + (writing ? "writing " : "reading ") + count + " bytes"));
                 } else {
                     complete();
                 }

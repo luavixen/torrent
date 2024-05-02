@@ -1,6 +1,7 @@
 package dev.foxgirl.torrent
 
 import dev.foxgirl.torrent.bencode.*
+import dev.foxgirl.torrent.client.Client
 import dev.foxgirl.torrent.client.Identity
 import dev.foxgirl.torrent.client.Peer
 import dev.foxgirl.torrent.client.Swarm
@@ -25,13 +26,12 @@ fun main() {
 
     val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
 
-    val swarm = Swarm(Identity.generateDefault(InetSocketAddress(InetAddress.getLocalHost(), 8008)))
+    val client = Client(Identity.generateDefault(InetSocketAddress(InetAddress.getLocalHost(), 8008)))
+    val swarm = client.createSwarm(metainfo.info)
 
-    swarm.addTorrent(metainfo.info)
-
-    val peerAddress = InetSocketAddress(InetAddress.getByName("127.0.0.1"), 5050)
+    val peerAddress = InetSocketAddress(InetAddress.getByName("127.0.0.1"), 51413)
     val peerChannel = AsynchronousSocketChannel.open()
-    val peer = Peer(swarm, peerChannel)
+    val peer = Peer(client, peerChannel)
 
     peerChannel.connect(peerAddress)
     peer.establishOutgoing(peerAddress, metainfo.infoHash).get()

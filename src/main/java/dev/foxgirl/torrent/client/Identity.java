@@ -90,7 +90,7 @@ public final class Identity {
         if (obj == this) return true;
         if (obj == null || obj.getClass() != getClass()) return false;
         var that = (Identity) obj;
-        return Arrays.equals(id, that.id) && socketAddress.equals(that.socketAddress);
+        return Arrays.equals(id, that.id) && Objects.equals(socketAddress, that.socketAddress);
     }
 
 }

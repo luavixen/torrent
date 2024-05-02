@@ -32,10 +32,15 @@ public final class Hash {
     public static final class DigestOutputStream extends OutputStream {
         private final Digest digest;
         private Hash hash;
+        private long count;
 
         public DigestOutputStream(@NotNull Algorithm algorithm) {
             Objects.requireNonNull(algorithm, "Argument 'algorithm'");
             digest = algorithm.createDigest();
+        }
+
+        public synchronized long getCount() {
+            return count;
         }
 
         @Override
@@ -44,15 +49,7 @@ public final class Hash {
                 throw new IllegalStateException("Stream is closed");
             }
             digest.update((byte) value);
-        }
-
-        @Override
-        public synchronized void write(byte @NotNull [] bytes) {
-            Objects.requireNonNull(bytes, "Argument 'bytes'");
-            if (hash != null) {
-                throw new IllegalStateException("Stream is closed");
-            }
-            digest.update(bytes, 0, bytes.length);
+            count++;
         }
 
         @Override
@@ -63,6 +60,7 @@ public final class Hash {
                 throw new IllegalStateException("Stream is closed");
             }
             digest.update(bytes, offset, length);
+            count += length;
         }
 
         @Override
