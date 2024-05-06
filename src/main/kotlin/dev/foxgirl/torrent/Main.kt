@@ -36,6 +36,12 @@ fun main() {
     peerChannel.connect(peerAddress)
     peer.establishOutgoing(peerAddress, metainfo.infoHash).get()
 
+    Thread.sleep(4000)
+
+    println("peer: $peer")
+    println("lastIncomingMessageTime: ${peer.protocol.lastIncomingMessageTime}")
+    println("lastOutgoingMessageTime: ${peer.protocol.lastOutgoingMessageTime}")
+
     /*
     Thread.sleep(2000)
 

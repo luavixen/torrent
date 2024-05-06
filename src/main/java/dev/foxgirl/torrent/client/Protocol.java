@@ -1,9 +1,6 @@
 package dev.foxgirl.torrent.client;
 
-import dev.foxgirl.torrent.util.DefaultExecutors;
-import dev.foxgirl.torrent.util.Hash;
-import dev.foxgirl.torrent.util.IO;
-import dev.foxgirl.torrent.util.Timeout;
+import dev.foxgirl.torrent.util.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -15,11 +12,16 @@ import java.nio.channels.AsynchronousByteChannel;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.Queue;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -49,7 +51,10 @@ public final class Protocol implements AutoCloseable {
     private static final long READ_TIMEOUT_MS = 120 * 1000;
     private static final long WRITE_TIMEOUT_MS = 30 * 1000;
     private static final long OPERATION_TIMEOUT_MS = 15 * 1000;
-    private static final long KEEPALIVE_INTERVAL_MS = 25 * 1000;
+    private static final long DISCONNECT_TIMEOUT_MS = 150 * 1000;
+    private static final long READ_HANDSHAKE_TIMEOUT_MS = 10 * 1000;
+    private static final long WRITE_HANDSHAKE_TIMEOUT_MS = 10 * 1000;
+    private static final long KEEPALIVE_INTERVAL_MS = 60 * 1000;
 
     private static final int READ_BUFFER_SIZE = 36 * 1024;
     private static final int WRITE_BUFFER_SIZE = 36 * 1024;
@@ -59,6 +64,9 @@ public final class Protocol implements AutoCloseable {
     private final AtomicBoolean isClosed = new AtomicBoolean();
 
     private final Object lock = new Object();
+
+    private Instant lastIncomingMessageTime = Instant.MIN;
+    private Instant lastOutgoingMessageTime = Instant.MIN;
 
     private Hash infoHash;
     private Identity identity;
@@ -109,6 +117,9 @@ public final class Protocol implements AutoCloseable {
                 // Handle keep-alive message
                 if (messageLength == 0) {
                     LOGGER.debug("Peer {} received keep-alive", getIdentity());
+
+                    updateLastIncomingMessageTime();
+
                     int remainingOffset = 4;
                     int remainingLength = buffer.position() - remainingOffset;
                     if (buffer.position() > 4) {
@@ -116,6 +127,7 @@ public final class Protocol implements AutoCloseable {
                         buffer.limit(buffer.capacity());
                         buffer.position(remainingLength);
                     }
+
                     readFromChannel();
                     return;
                 }
@@ -146,6 +158,8 @@ public final class Protocol implements AutoCloseable {
                 }
 
                 LOGGER.debug("Peer {} received message {} with length {}", getIdentity(), messageType, messagePayloadLength);
+
+                updateLastIncomingMessageTime();
 
                 var messagePayload = buffer.asReadOnlyBuffer().limit(messageTotalLength).position(5);
 
@@ -295,6 +309,10 @@ public final class Protocol implements AutoCloseable {
             if (isClosed()) {
                 return;
             }
+            if (Duration.between(getLastIncomingMessageTime(), Instant.now()).toMillis() > DISCONNECT_TIMEOUT_MS) {
+                close(new TimeoutException("Peer disconnected due to inactivity"));
+                return;
+            }
             sendKeepAlive();
             sendKeepAliveOnIntervalAfterDelay();
         }
@@ -351,6 +369,8 @@ public final class Protocol implements AutoCloseable {
                     return;
                 }
 
+                updateLastOutgoingMessageTime();
+
                 if (state != State.WRITING_KEEPALIVE) {
                     PendingMessage pendingMessage;
                     synchronized (this) {
@@ -401,6 +421,30 @@ public final class Protocol implements AutoCloseable {
         }
     }
 
+    public @NotNull Instant getLastIncomingMessageTime() {
+        synchronized (lock) {
+            return lastIncomingMessageTime;
+        }
+    }
+    public @NotNull Instant getLastOutgoingMessageTime() {
+        synchronized (lock) {
+            return lastOutgoingMessageTime;
+        }
+    }
+
+    private void updateLastIncomingMessageTime() {
+        Instant now = Instant.now();
+        synchronized (lock) {
+            lastIncomingMessageTime = now;
+        }
+    }
+    private void updateLastOutgoingMessageTime() {
+        Instant now = Instant.now();
+        synchronized (lock) {
+            lastOutgoingMessageTime = now;
+        }
+    }
+
     public boolean isConnected() {
         return connectionState.get() == 2;
     }
@@ -440,28 +484,18 @@ public final class Protocol implements AutoCloseable {
 
         if (cause == null) {
             cause = new IllegalStateException("Peer closed");
-        }
-
-        var message = cause.getMessage();
-        if (message == null) {
-            message = cause.getClass().getName();
+        } else {
+            cause = Throwables.unwrap(cause);
         }
 
         var identity = getIdentity();
         if (identity == null) {
-            LOGGER.debug("Peer (no identity) closed: {}", message);
+            LOGGER.debug("Peer (no identity) closed: {}", Throwables.getMessage(cause));
         } else {
-            LOGGER.info("Peer {} closed: {}", identity, message);
+            LOGGER.info("Peer {} closed: {}", identity, Throwables.getMessage(cause));
         }
 
-        var unwrappedException = cause;
-        if (unwrappedException instanceof ExecutionException) {
-            unwrappedException = unwrappedException.getCause();
-        }
-        if (
-            !(unwrappedException instanceof IllegalStateException) &&
-            !(unwrappedException instanceof TimeoutException)
-        ) {
+        if (!Throwables.isExpected(cause)) {
             if (identity == null) {
                 LOGGER.debug("Peer (no identity) closed with unexpected exception", cause);
             } else {
@@ -565,11 +599,13 @@ public final class Protocol implements AutoCloseable {
 
                         buffer.clear();
 
-                        timeout.start(READ_TIMEOUT_MS);
+                        timeout.start(READ_HANDSHAKE_TIMEOUT_MS);
                         return IO.asyncChannelReadAll(channel, buffer);
                     })
                     .thenApply(__ -> {
                         timeout.cancel();
+
+                        updateLastIncomingMessageTime();
 
                         var peerPstrLen = buffer.get();
                         if (peerPstrLen != PROTOCOL_STRING.length) {
@@ -623,11 +659,13 @@ public final class Protocol implements AutoCloseable {
                         /* clientIdentityBytes */ buffer.put(clientIdentity.getID());
                         buffer.flip();
 
-                        timeout.start(WRITE_TIMEOUT_MS);
+                        timeout.start(WRITE_HANDSHAKE_TIMEOUT_MS);
                         return IO.asyncChannelWriteAll(channel, buffer);
                     })
                     .thenApply(__ -> {
                         timeout.cancel();
+
+                        updateLastOutgoingMessageTime();
 
                         return null;
                     });
@@ -667,7 +705,7 @@ public final class Protocol implements AutoCloseable {
         private void complete(Object ignored, Throwable cause) {
             timeout.cancel();
             if (cause != null) {
-                LOGGER.info("Peer socket {} connection failed", peerAddress, cause);
+                LOGGER.debug("Peer socket {} handshake failed: {}", peerAddress, Throwables.getMessage(cause));
                 close(cause);
             }
         }
@@ -745,8 +783,8 @@ public final class Protocol implements AutoCloseable {
     public @NotNull String toString() {
         synchronized (lock) {
             return String.format(
-                "Protocol{infoHash=%s, identity=%s, extensions=%s, isClosed=%s}",
-                infoHash, identity, extensions, isClosed()
+                "Protocol{infoHash=%s, identity=%s, extensions=%s, isClosed=%s, isConnected=%s}",
+                infoHash, identity, extensions, isClosed(), isConnected()
             );
         }
     }

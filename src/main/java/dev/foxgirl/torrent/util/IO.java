@@ -2,20 +2,15 @@ package dev.foxgirl.torrent.util;
 
 import org.jetbrains.annotations.NotNull;
 
-import java.io.*;
-import java.net.SocketTimeoutException;
-import java.net.http.HttpTimeoutException;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousByteChannel;
-import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.CompletionHandler;
-import java.nio.channels.InterruptedByTimeoutException;
-import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileSystemException;
-import java.nio.file.NoSuchFileException;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeoutException;
 
 public final class IO {
 
@@ -93,7 +88,11 @@ public final class IO {
         public void completed(Integer result, Void attachment) {
             if (result < 0) {
                 if (errorOnEOF) {
-                    completeExceptionally(new EOFException("Unexpected EOF after " + (writing ? "writing " : "reading ") + count + " bytes"));
+                    if (count == 0) {
+                        completeExceptionally(new EOFException("Unexpected EOF while " + (writing ? "writing" : "reading")));
+                    } else {
+                        completeExceptionally(new EOFException("Unexpected EOF after " + (writing ? "writing " : "reading ") + count + " bytes"));
+                    }
                 } else {
                     complete();
                 }
@@ -195,45 +194,6 @@ public final class IO {
                 buffer.put(bytes, offset, length);
             }
         };
-    }
-
-    public static @NotNull RuntimeException wrapException(@NotNull Exception cause) {
-        Objects.requireNonNull(cause, "Argument 'cause'");
-        if (cause instanceof EOFException) {
-            return new RuntimeException("Unexpected EOF", cause);
-        }
-        if (cause instanceof FileNotFoundException || cause instanceof NoSuchFileException) {
-            return new RuntimeException("File not found", cause);
-        }
-        if (cause instanceof FileAlreadyExistsException) {
-            return new RuntimeException("File already exists", cause);
-        }
-        if (cause instanceof FileSystemException) {
-            return new RuntimeException("File system error", cause);
-        }
-        if (
-            cause instanceof HttpTimeoutException ||
-            cause instanceof SocketTimeoutException ||
-            cause instanceof InterruptedByTimeoutException ||
-            cause instanceof TimeoutException
-        ) {
-            return new RuntimeException("Timeout", cause);
-        }
-        if (
-            cause instanceof InterruptedException ||
-            cause instanceof InterruptedIOException ||
-            cause instanceof ClosedByInterruptException
-        ) {
-            return new RuntimeException("Interrupted unexpectedly", cause);
-        }
-        if (cause instanceof IOException) {
-            return new RuntimeException("Unexpected IO exception", cause);
-        }
-        return cause instanceof RuntimeException ? (RuntimeException) cause : new RuntimeException(cause);
-    }
-
-    public static void throwException(@NotNull Exception cause) {
-        throw wrapException(cause);
     }
 
 }
