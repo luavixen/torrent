@@ -1,15 +1,23 @@
 package dev.foxgirl.torrent.bencode2
 
+/** Represents a Bencode element. */
 sealed interface Bencode {
 
-    fun isInteger() = false
-    fun isString() = false
-    fun isList() = false
-    fun isMap() = false
+    /** Creates a deep copy of this Bencode element. */
+    fun copy(): Bencode
 
-    fun asInteger(): BencodeInteger = throw ClassCastException()
-    fun asString(): BencodeString = throw ClassCastException()
-    fun asList(): BencodeList = throw ClassCastException()
-    fun asMap(): BencodeMap = throw ClassCastException()
+    companion object {
+
+        fun of(value: Int) = BencodeInteger(value)
+        fun of(value: Long) = BencodeInteger(value)
+
+        fun of(value: String) = BencodeString(value)
+        fun of(value: ByteArray) = BencodeString(value)
+
+        fun <T> collect(source: Collection<T>, transform: (T) -> Bencode): BencodeList {
+            return source.mapTo(BencodeList(source.size), transform)
+        }
+
+    }
 
 }

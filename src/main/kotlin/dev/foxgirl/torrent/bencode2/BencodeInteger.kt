@@ -1,9 +1,12 @@
 package dev.foxgirl.torrent.bencode2
 
+/** Represents a Bencode integer. */
 class BencodeInteger(val value: Long) : Bencode, Comparable<BencodeInteger> {
 
-    override fun isInteger() = true
-    override fun asInteger() = this
+    constructor(value: Byte) : this(value.toLong())
+    constructor(value: Int) : this(value.toLong())
+
+    override fun copy(): BencodeInteger = this
 
     override fun hashCode() = value.hashCode()
     override fun toString() = value.toString()

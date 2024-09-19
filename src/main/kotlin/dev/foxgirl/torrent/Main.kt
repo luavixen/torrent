@@ -19,10 +19,12 @@ import java.util.concurrent.ThreadLocalRandom
 
 fun main() {
 
+    /*
     System.setProperty(org.slf4j.impl.SimpleLogger.DEFAULT_LOG_LEVEL_KEY, "TRACE")
     System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_DATE_TIME_KEY, "false")
     System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_THREAD_NAME_KEY, "false")
     System.setProperty(org.slf4j.impl.SimpleLogger.SHOW_LOG_NAME_KEY, "false")
+    */
 
     val metainfo = MetaInfo.fromBencode(BencodeDecoder.decodeFromStream(Files.newInputStream(Path.of("./torrents/silly.torrent")).buffered()))
 
